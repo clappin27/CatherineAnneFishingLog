@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Billfish Log</title>
+<meta name="description" content="Log every billfish bite in a few taps. Shared with your crew, private to your boat, and it works offshore without signal.">
+<meta name="theme-color" content="#EDF2F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#07121A" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Billfish Log">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="vendor/supabase.js" defer></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+
+<!-- LOADING -->
+<section id="v-loading" class="wrap">
+  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Billfish Log</h1><p>Loading your log…</p></div></div>
+  <noscript><div class="banner"><b>JavaScript is off.</b> Turn it on in your browser settings to use Billfish Log.</div></noscript>
+</section>
+
+<!-- SIGN IN -->
+<section id="v-auth" class="wrap" hidden>
+  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Billfish Log</h1><p>Every bite, every spread, every tide.</p></div></div>
+  <ul class="pitch">
+    <li>Log a bite in a few taps, right after the fish</li>
+    <li>Your whole crew shares one log; other boats can't see it</li>
+    <li>Works offshore with no signal and syncs at the dock</li>
+  </ul>
+  <div class="seg two" role="group" aria-label="Sign in or create account" style="margin-top:20px">
+    <button type="button" id="auth-tab-in" aria-pressed="true">Sign in</button>
+    <button type="button" id="auth-tab-up" aria-pressed="false">Create account</button>
+  </div>
+  <form class="card stack" id="auth-form" novalidate>
+    <div class="fld" id="auth-name-wrap" hidden><label for="auth-name">Your name (what the crew calls you)</label><input id="auth-name" autocomplete="name" maxlength="60"></div>
+    <div class="fld"><label for="auth-email">Email</label><input id="auth-email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" required></div>
+    <div class="fld"><label for="auth-pass">Password</label><input id="auth-pass" type="password" autocomplete="current-password" minlength="8" required></div>
+    <p class="form-msg" id="auth-msg" role="alert"></p>
+    <button class="btn primary" type="submit" id="auth-submit">Sign in</button>
+    <button class="link" type="button" id="auth-forgot">Forgot your password?</button>
+  </form>
+  <div class="spacer"></div>
+</section>
+
+<!-- CREATE / JOIN A BOAT -->
+<section id="v-onboard" class="wrap" hidden>
+  <header class="top"><div><div class="eyebrow" id="ob-hello">Welcome aboard</div><h1>Set up your boat</h1></div></header>
+  <form class="card stack" id="join-form" novalidate>
+    <div><h2>Join your crew's boat</h2><p>Got an invite code or link from your captain? Enter the code here.</p></div>
+    <div class="fld"><label for="join-code">Invite code</label><input id="join-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" maxlength="12"></div>
+    <p class="form-msg" id="join-msg" role="alert"></p>
+    <button class="btn primary" type="submit">Join boat</button>
+  </form>
+  <form class="card stack" id="create-form" novalidate>
+    <div><h2>Start a log for your boat</h2><p>You'll be the captain and get an invite code to share with your crew.</p></div>
+    <div class="fld"><label for="create-name">Boat name</label><input id="create-name" maxlength="80" placeholder="e.g. Reel Time"></div>
+    <div class="fld"><label for="create-port">Home port (optional)</label><input id="create-port" maxlength="80" placeholder="e.g. Southport, NC"></div>
+    <p class="form-msg" id="create-msg" role="alert"></p>
+    <button class="btn primary" type="submit">Create boat</button>
+  </form>
+  <div class="btns" style="margin-top:12px">
+    <button class="btn" type="button" id="ob-back" hidden>Back to my log</button>
+    <button class="btn" type="button" id="ob-signout">Sign out</button>
+  </div>
+  <div class="spacer"></div>
+</section>
+
+<!-- MAIN HEADER (shared by Log / Summary / Boat) -->
+<header class="wrap" id="main-head" hidden>
+  <div class="top">
+    <div><button class="boat-switch" type="button" id="boat-switch"><span class="eyebrow" id="head-boat"></span></button><h1 id="head-title">Billfish Log</h1></div>
+    <button class="status" type="button" id="status" aria-label="Sync status. Tap to sync now"><span class="dot"></span><span id="status-text">Starting…</span></button>
+  </div>
+  <div id="banner" class="banner" hidden></div>
+  <div id="install-banner" class="banner info" hidden></div>
+</header>
+
+<!-- LOG -->
+<section id="v-log" class="wrap" hidden>
+  <div class="today">
+    <div class="today-head"><h2>Today</h2><span id="today-date"></span></div>
+    <div class="tally">
+      <div><b id="t-bites">0</b><small>Bites</small></div>
+      <div><b id="t-rel">0</b><small>Released</small></div>
+      <div><b id="t-boat">0</b><small>Boated</small></div>
+      <div><b id="t-lost">0</b><small>Lost / missed</small></div>
+    </div>
+    <button class="big-btn" id="btn-new" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      Log a bite
+    </button>
+  </div>
+  <div id="list-area"></div>
+  <div class="spacer"></div>
+</section>
+
+<!-- SUMMARY -->
+<section id="v-summary" class="wrap" hidden>
+  <div class="seg" id="range" role="group" aria-label="Time range">
+    <button type="button" data-r="today">Today</button>
+    <button type="button" data-r="week">7 days</button>
+    <button type="button" data-r="season" id="season-btn">Season</button>
+    <button type="button" data-r="all">All</button>
+  </div>
+  <div class="kpis" id="kpis"></div>
+  <div class="breaks" id="breaks"></div>
+  <p class="note">Percentages are out of every bite logged, missed bites included, so spread and lure patterns count fish that didn't stay hooked.</p>
+  <button class="btn primary more" id="btn-export" type="button">Download the log for Excel (.csv)</button>
+  <div class="spacer"></div>
+</section>
+
+<!-- BOAT -->
+<section id="v-boat" class="wrap" hidden>
+  <div class="card" id="invite-card">
+    <h2>Invite your crew</h2>
+    <p>Send this link or code. Anyone who joins can log bites and see this boat's log.</p>
+    <div class="code" id="invite-code" aria-label="Invite code"></div>
+    <div class="btns">
+      <button class="btn primary" type="button" id="btn-share-invite">Share invite link</button>
+      <button class="btn" type="button" id="btn-copy-code">Copy code</button>
+    </div>
+    <div id="regen-wrap" style="margin-top:10px">
+      <button class="link" type="button" id="btn-regen">Make a new code</button>
+      <div class="confirm" id="regen-confirm" hidden>
+        <p>Make a new code? The old code and link stop working. People already on the boat stay on it.</p>
+        <div class="acts"><button class="btn" type="button" id="regen-no">Keep this code</button><button class="btn danger-solid" type="button" id="regen-yes">Make new code</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Crew</h2>
+    <div class="people" id="crew-list"></div>
+  </div>
+
+  <div class="card">
+    <h2>Angler buttons</h2>
+    <p id="anglers-help">The names on the "Angler on the rod" buttons when logging a bite.</p>
+    <div class="tagchips" id="angler-tags"></div>
+    <form class="inline-add" id="angler-add-form" novalidate>
+      <div class="fld"><label for="angler-add">Add a name</label><input id="angler-add" maxlength="40" autocomplete="off"></div>
+      <button class="btn" type="submit">Add</button>
+    </form>
+  </div>
+
+  <form class="card stack" id="boat-form" novalidate>
+    <h2>Boat details</h2>
+    <div class="fld"><label for="boat-name">Boat name</label><input id="boat-name" maxlength="80"></div>
+    <div class="fld"><label for="boat-port">Home port</label><input id="boat-port" maxlength="80"></div>
+    <p class="form-msg" id="boat-msg" role="alert"></p>
+    <button class="btn primary" type="submit" id="boat-save">Save boat details</button>
+  </form>
+
+  <div class="card">
+    <h2>Your boats</h2>
+    <div class="boatlist" id="boat-list"></div>
+    <button class="btn more" type="button" id="btn-add-boat">Join or start another boat</button>
+  </div>
+
+  <div class="card" id="install-card" hidden>
+    <h2>Put it on your home screen</h2>
+    <div id="install-body"></div>
+  </div>
+
+  <form class="card stack" id="me-form" novalidate>
+    <h2>Your account</h2>
+    <p id="me-email"></p>
+    <div class="fld"><label for="me-name">Your name</label><input id="me-name" maxlength="60" autocomplete="name"></div>
+    <p class="form-msg" id="me-msg" role="alert"></p>
+    <div class="btns">
+      <button class="btn" type="submit">Save name</button>
+      <button class="btn" type="button" id="btn-signout">Sign out</button>
+    </div>
+    <div>
+      <button class="link" type="button" id="btn-leave" style="color:var(--danger)">Leave this boat</button>
+      <div class="confirm" id="leave-confirm" hidden>
+        <p id="leave-text">Leave this boat? You'll stop seeing its log. Bites you logged stay in the boat's log.</p>
+        <div class="acts"><button class="btn" type="button" id="leave-no">Stay</button><button class="btn danger-solid" type="button" id="leave-yes">Leave boat</button></div>
+      </div>
+    </div>
+  </form>
+  <div class="spacer"></div>
+</section>
+
+<!-- LOG A BITE -->
+<section id="v-form" class="wrap" hidden>
+  <div class="form-top">
+    <button class="back" id="btn-back" type="button" aria-label="Cancel and go back">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Back
+    </button>
+    <h2 id="form-title">New bite</h2>
+  </div>
+
+  <div id="carry" class="carry" hidden><span id="carry-text"></span><button type="button" id="carry-clear">Clear</button></div>
+
+  <div class="grp">
+    <div class="grp-label">When <span class="must">Must fill</span><button class="now" id="btn-now" type="button">Set to now</button></div>
+    <div class="row2">
+      <div class="fld"><label for="f-catch_date">Date</label><input type="date" id="f-catch_date"></div>
+      <div class="fld"><label for="f-bite_time">Time of bite</label><input type="time" id="f-bite_time"></div>
+    </div>
+  </div>
+
+  <div class="grp"><div class="grp-label" id="lb-species">Species <span class="must">Must fill</span></div><div class="chips" data-field="species" role="group" aria-labelledby="lb-species"></div></div>
+  <div class="grp"><div class="grp-label" id="lb-result">Result</div><div class="chips" data-field="result" role="group" aria-labelledby="lb-result"></div></div>
+  <div class="grp">
+    <div class="grp-label" id="lb-angler">Angler on the rod</div>
+    <div class="chips" data-field="angler" role="group" aria-labelledby="lb-angler"></div>
+    <div class="fld" id="angler-other-wrap" hidden style="margin-top:10px"><label for="f-angler-other">Angler's name</label><input id="f-angler-other" autocomplete="off" maxlength="60" placeholder="Guest's name"></div>
+  </div>
+  <div class="grp"><div class="grp-label" id="lb-spread">Spread position <span class="must">Must fill</span></div><div class="chips" data-field="spread" role="group" aria-labelledby="lb-spread"></div></div>
+  <div class="grp"><div class="grp-label" id="lb-lure_type">Lure / bait type <span class="must">Must fill</span></div><div class="chips" data-field="lure_type" role="group" aria-labelledby="lb-lure_type"></div>
+    <div class="fld" style="margin-top:12px"><label for="f-lure_name">Lure name / colour</label><input id="f-lure_name" list="dl-lure" autocomplete="off" maxlength="120" placeholder="e.g. Blue/white chugger"></div>
+  </div>
+  <div class="grp"><div class="grp-label" id="lb-tide">Tide <span class="must">Must fill</span></div><div class="chips" data-field="tide" role="group" aria-labelledby="lb-tide"></div></div>
+
+  <div class="divider">If you know it<small>A partial entry is still useful. Skip anything you don't know.</small></div>
+
+  <div class="grp">
+    <div class="fld"><label for="f-location">Location / area</label><input id="f-location" list="dl-loc" autocomplete="off" maxlength="120" placeholder="Ledge, numbers or area"></div>
+    <div class="gps">
+      <button class="btn small" type="button" id="btn-gps">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" style="vertical-align:-3px;margin-right:4px"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>Mark GPS position
+      </button>
+      <span class="coords" id="gps-coords"></span>
+      <button class="link" type="button" id="gps-clear" hidden>Clear</button>
+    </div>
+    <div class="row2" style="margin-top:12px">
+      <div class="fld unit"><label for="f-depth_ft">Depth</label><input id="f-depth_ft" inputmode="decimal" autocomplete="off"><span>ft</span></div>
+      <div class="fld unit"><label for="f-water_temp_f">Water temp</label><input id="f-water_temp_f" inputmode="decimal" autocomplete="off"><span>°F</span></div>
+    </div>
+  </div>
+  <div class="grp"><div class="grp-label" id="lb-omni">Omni sonar</div><div class="chips" data-field="omni" role="group" aria-labelledby="lb-omni"></div></div>
+  <div class="grp"><div class="grp-label" id="lb-seas">Sea conditions</div><div class="chips" data-field="seas" role="group" aria-labelledby="lb-seas"></div></div>
+  <div class="grp">
+    <div class="row2">
+      <div class="fld unit"><label for="f-fight_min">Fight time</label><input id="f-fight_min" inputmode="decimal" autocomplete="off"><span>min</span></div>
+      <div class="fld unit"><label for="f-weight_lb">Est. weight</label><input id="f-weight_lb" inputmode="decimal" autocomplete="off"><span>lb</span></div>
+    </div>
+    <div class="fld"><label for="f-notes">Notes</label><textarea id="f-notes" maxlength="2000" placeholder="Teaser bite, double-header, bait in the area, grass, current line…"></textarea></div>
+  </div>
+
+  <div class="del-zone" id="del-zone" hidden>
+    <button class="btn danger" id="btn-del" type="button" style="width:100%">Delete this bite</button>
+    <div class="confirm" id="del-confirm" hidden>
+      <p id="del-text">Delete this bite?</p>
+      <div class="acts"><button class="btn" type="button" id="del-keep">Keep it</button><button class="btn danger-solid" type="button" id="del-yes">Delete</button></div>
+    </div>
+  </div>
+
+  <div class="savebar">
+    <div class="missing-note" id="missing-note"></div>
+    <button class="btn" id="btn-cancel" type="button">Cancel</button>
+    <button class="big-btn" id="btn-save" type="button">Save bite</button>
+  </div>
+  <datalist id="dl-lure"></datalist>
+  <datalist id="dl-loc"></datalist>
+</section>
+
+<nav class="tabs" id="tabs" aria-label="Sections" hidden>
+  <div class="in">
+    <button class="tab" type="button" data-v="log">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1.2" fill="currentColor"/><circle cx="4" cy="12" r="1.2" fill="currentColor"/><circle cx="4" cy="18" r="1.2" fill="currentColor"/></svg>Log
+    </button>
+    <button class="tab" type="button" data-v="summary">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>Summary
+    </button>
+    <button class="tab" type="button" data-v="boat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 15l2 5h14l2-5H3z"/><path d="M12 15V3l6 9h-6"/></svg>Boat
+    </button>
+  </div>
+</nav>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
