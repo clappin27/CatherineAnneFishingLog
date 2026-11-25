@@ -15,6 +15,7 @@ A phone-first catch log for billfish crews. Captains create a boat, share an inv
 | `app/sw.js` | Service worker: keeps the app usable offline. Bump `VERSION` on every release. |
 | `app/vendor/supabase.js` | Supabase JS client v2.45.4 (pinned copy, so the app loads offline). |
 | `supabase/migrations/` | Database tables, security rules (row level security) and server functions. |
+| `tools/old-address-redirect/` | Source of the `clappin27/billfish-log` repo, which forwards the app's old address (and old invite links) to the new one. |
 | `tools/make_icons.py` | Redraws the app icons (`python3 tools/make_icons.py`). |
 | `prototype/` | The original single-boat prototype (kept on this computer only, not in the public repo). |
 
