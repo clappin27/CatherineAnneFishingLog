@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Billfish Log</title>
-<meta name="description" content="Log every billfish bite in a few taps. Shared with your crew, private to your boat, and it works offshore without signal.">
+<title>Catherine Anne Fishing Log</title>
+<meta name="description" content="The Catherine Anne's billfish log. Log every bite in a few taps; works offshore without signal.">
 <meta name="theme-color" content="#EDF2F5" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#07121A" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Billfish Log">
+<meta name="apple-mobile-web-app-title" content="Catherine Anne">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -25,16 +25,16 @@
 
 <!-- LOADING -->
 <section id="v-loading" class="wrap">
-  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Billfish Log</h1><p>Loading your log…</p></div></div>
+  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Catherine Anne</h1><p>Fishing log · loading…</p></div></div>
   <noscript><div class="banner"><b>JavaScript is off.</b> Turn it on in your browser settings to use Billfish Log.</div></noscript>
 </section>
 
 <!-- SIGN IN -->
 <section id="v-auth" class="wrap" hidden>
-  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Billfish Log</h1><p>Every bite, every spread, every tide.</p></div></div>
+  <div class="brand"><img src="icons/icon-192.png" alt=""><div><h1>Catherine Anne</h1><p>Fishing log · every bite, every spread, every tide.</p></div></div>
   <ul class="pitch">
     <li>Log a bite in a few taps, right after the fish</li>
-    <li>Your whole crew shares one log; other boats can't see it</li>
+    <li>The whole crew shares one log, private to the boat</li>
     <li>Works offshore with no signal and syncs at the dock</li>
   </ul>
   <div class="seg two" role="group" aria-label="Sign in or create account" style="margin-top:20px">
@@ -45,23 +45,25 @@
     <div class="fld" id="auth-name-wrap" hidden><label for="auth-name">Your name (what the crew calls you)</label><input id="auth-name" autocomplete="name" maxlength="60"></div>
     <div class="fld"><label for="auth-email">Email</label><input id="auth-email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" required></div>
     <div class="fld"><label for="auth-pass">Password</label><input id="auth-pass" type="password" autocomplete="current-password" minlength="8" required></div>
+    <div class="fld" id="auth-code-wrap" hidden><label for="auth-code">Boat code (from the captain's invite)</label><input id="auth-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" maxlength="12"></div>
     <p class="form-msg" id="auth-msg" role="alert"></p>
     <button class="btn primary" type="submit" id="auth-submit">Sign in</button>
     <button class="link" type="button" id="auth-forgot">Forgot your password?</button>
+    <button class="btn" type="button" id="auth-back" hidden>Back to the log</button>
   </form>
   <div class="spacer"></div>
 </section>
 
 <!-- CREATE / JOIN A BOAT -->
 <section id="v-onboard" class="wrap" hidden>
-  <header class="top"><div><div class="eyebrow" id="ob-hello">Welcome aboard</div><h1>Set up your boat</h1></div></header>
+  <header class="top"><div><div class="eyebrow" id="ob-hello">Welcome aboard</div><h1 id="ob-title">Join the boat</h1></div></header>
   <form class="card stack" id="join-form" novalidate>
-    <div><h2>Join your crew's boat</h2><p>Got an invite code or link from your captain? Enter the code here.</p></div>
+    <div><h2>Join the boat</h2><p>Enter the boat code your captain sent you (it's also in the invite link).</p></div>
     <div class="fld"><label for="join-code">Invite code</label><input id="join-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH" maxlength="12"></div>
     <p class="form-msg" id="join-msg" role="alert"></p>
     <button class="btn primary" type="submit">Join boat</button>
   </form>
-  <form class="card stack" id="create-form" novalidate>
+  <form class="card stack" id="create-form" novalidate hidden>
     <div><h2>Start a log for your boat</h2><p>You'll be the captain and get an invite code to share with your crew.</p></div>
     <div class="fld"><label for="create-name">Boat name</label><input id="create-name" maxlength="80" placeholder="e.g. Reel Time"></div>
     <div class="fld"><label for="create-port">Home port (optional)</label><input id="create-port" maxlength="80" placeholder="e.g. Southport, NC"></div>
@@ -79,7 +81,7 @@
 <header class="wrap" id="main-head" hidden>
   <div class="top">
     <div><button class="boat-switch" type="button" id="boat-switch"><span class="eyebrow" id="head-boat"></span></button><h1 id="head-title">Billfish Log</h1></div>
-    <button class="status" type="button" id="status" aria-label="Sync status. Tap to sync now"><span class="dot"></span><span id="status-text">Starting…</span></button>
+    <button class="status" type="button" id="status"><span class="dot"></span><span id="status-text">Starting…</span><span class="sr-only"> (tap to sync now)</span></button>
   </div>
   <div id="banner" class="banner" hidden></div>
   <div id="install-banner" class="banner info" hidden></div>
@@ -161,7 +163,7 @@
     <button class="btn primary" type="submit" id="boat-save">Save boat details</button>
   </form>
 
-  <div class="card">
+  <div class="card" id="boats-card">
     <h2>Your boats</h2>
     <div class="boatlist" id="boat-list"></div>
     <button class="btn more" type="button" id="btn-add-boat">Join or start another boat</button>
@@ -181,7 +183,7 @@
       <button class="btn" type="submit">Save name</button>
       <button class="btn" type="button" id="btn-signout">Sign out</button>
     </div>
-    <div>
+    <div id="leave-wrap">
       <button class="link" type="button" id="btn-leave" style="color:var(--danger)">Leave this boat</button>
       <div class="confirm" id="leave-confirm" hidden>
         <p id="leave-text">Leave this boat? You'll stop seeing its log. Bites you logged stay in the boat's log.</p>
@@ -260,6 +262,10 @@
 
   <div class="savebar">
     <div class="missing-note" id="missing-note"></div>
+    <div class="confirm" id="discard-confirm" hidden style="grid-column:1/-1;margin:0">
+      <p>Throw away this bite? What you entered will be lost.</p>
+      <div class="acts"><button class="btn" type="button" id="discard-no">Keep editing</button><button class="btn danger-solid" type="button" id="discard-yes">Throw away</button></div>
+    </div>
     <button class="btn" id="btn-cancel" type="button">Cancel</button>
     <button class="big-btn" id="btn-save" type="button">Save bite</button>
   </div>
@@ -280,6 +286,6 @@
     </button>
   </div>
 </nav>
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="toast off" id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

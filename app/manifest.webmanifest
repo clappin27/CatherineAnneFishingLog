@@ -1,7 +1,7 @@
 {
-  "name": "Billfish Log",
-  "short_name": "Billfish Log",
-  "description": "Log every billfish bite in a few taps. Shared with your crew, private to your boat, works offshore without signal.",
+  "name": "Catherine Anne Fishing Log",
+  "short_name": "Catherine Anne",
+  "description": "The Catherine Anne's billfish log. Log every bite in a few taps; works offshore without signal.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

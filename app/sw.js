@@ -1,6 +1,6 @@
 // Billfish Log service worker: keeps the app itself available offshore with no signal.
 // Catch data never goes through this cache; it lives in the app's own storage and Supabase.
-const VERSION = 'bl-2026-11-24-1';
+const VERSION = 'bl-2026-11-24-2';
 const SHELL_CACHE = `shell-${VERSION}`;
 const RUNTIME_CACHE = 'runtime-v1';
 const SHELL = [
@@ -9,7 +9,8 @@ const SHELL = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(SHELL_CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache so a release never mixes old and new files.
+  event.waitUntil(caches.open(SHELL_CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', event => {
@@ -37,28 +38,34 @@ self.addEventListener('fetch', event => {
   }
   if (url.origin !== self.location.origin) return;
 
-  // Opening the app: try the network briefly (weak signal offshore), fall back to the saved copy.
+  // Opening the app: always use this release's saved page, so the page and its scripts match.
+  // New releases arrive by installing a new service worker, which then reloads the app.
   if (req.mode === 'navigate') {
     event.respondWith((async () => {
-      try {
-        const res = await Promise.race([fetch(req), timeout(3500)]);
-        if (res && res.ok) { const c = await caches.open(SHELL_CACHE); c.put('./index.html', res.clone()); }
-        return res;
-      } catch (e) {
-        const c = await caches.open(SHELL_CACHE);
-        return (await c.match('./index.html')) || (await c.match('./')) || Response.error();
-      }
+      const c = await caches.open(SHELL_CACHE);
+      const hit = (await c.match('./index.html')) || (await c.match('./'));
+      if (hit) return hit;
+      try { return await Promise.race([fetch(req), timeout(8000)]); } catch (e) { return Response.error(); }
     })());
     return;
   }
 
-  // App files: serve the saved copy instantly, refresh it in the background.
-  event.respondWith(staleWhileRevalidate(req, SHELL_CACHE));
+  // App files: always this release's saved copy (never refreshed in place, so files can't mix across releases).
+  event.respondWith((async () => {
+    const c = await caches.open(SHELL_CACHE);
+    const hit = await c.match(req, { ignoreSearch: true });
+    if (hit) return hit;
+    try {
+      const res = await fetch(req);
+      if (res && res.ok) c.put(req, res.clone());
+      return res;
+    } catch (e) { return new Response('', { status: 504, statusText: 'Offline' }); }
+  })());
 });
 
 async function staleWhileRevalidate(req, cacheName) {
   const cache = await caches.open(cacheName);
-  const cached = await cache.match(req, { ignoreSearch: cacheName === SHELL_CACHE });
+  const cached = await cache.match(req);
   const network = fetch(req).then(res => {
     if (res && (res.ok || res.type === 'opaque')) cache.put(req, res.clone());
     return res;

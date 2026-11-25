@@ -1,7 +1,7 @@
 // Billfish Log — offline-first catch log for billfish crews.
 // Data flow: every save goes to a local outbox first (localStorage), then uploads to Supabase when there is signal.
 // Each boat's catches are cached on the device so the log opens and works with no connection.
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, PILOT_BOAT_ONLY, APP_NAME } from './config.js';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -48,6 +48,7 @@ const LS = {
 const K = {
   lastUser: 'bl1.lastUser',
   installDismissed: 'bl1.installDismissed',
+  pendingJoin: 'bl1.pendingJoin',
   boats: u => `bl1.u.${u}.boats`,
   boatId: u => `bl1.u.${u}.boatId`,
   outbox: u => `bl1.u.${u}.outbox`,
@@ -66,6 +67,7 @@ const S = {
   syncing: false, syncAgain: false, lastSyncAt: null, lastSyncErr: null,
   channel: null, flashId: null, form: null, pendingJoin: null, installEvt: null,
   authMode: 'in', signingInFor: null, recovery: false, signoutArmed: false,
+  reauth: false, ready: false, gen: 0, authLinkErr: null,
 };
 
 // ------------------------------------------------------------------ small helpers
@@ -109,13 +111,14 @@ function h(tag, attrs, ...kids) {
 }
 let toastTimer = null;
 function toast(msg, ms = 3400) {
-  const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+  const t = $('#toast'); t.textContent = ''; t.classList.remove('off');
+  requestAnimationFrame(() => { t.textContent = msg; }); // set after a frame so screen readers announce it
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.classList.add('off'); }, ms);
 }
 function setMsg(sel, text, kind) { const el = $(sel); el.textContent = text || ''; el.className = 'form-msg' + (kind ? ' ' + kind : ''); }
 function isNetErr(e) {
   if (!e) return false;
-  if (e.name === 'AbortError' || e.name === 'TimeoutError') return true;
+  if (e.name === 'AbortError' || e.name === 'TimeoutError' || e.name === 'AuthRetryableFetchError') return true;
   const m = s(e.message || e.error_description || e);
   return /fetch|network|load failed|timed? ?out|offline|connection/i.test(m) || e.status === 0 || e.code === '' || (e.status === undefined && e.code === undefined && /TypeError/.test(s(e.name)));
 }
@@ -147,12 +150,22 @@ function loadUserCache(uid) {
   loadBoatCache();
 }
 function loadBoatCache() {
+  S.gen++;
   S.rows = new Map(Object.entries(S.boatId ? (LS.get(K.rows(S.boatId), {}) || {}) : {}));
   S.crew = S.boatId ? (LS.get(K.crew(S.boatId), []) || []) : [];
   S.listLimit = LIST_PAGE;
 }
 const saveRows = () => { if (S.boatId) LS.set(K.rows(S.boatId), Object.fromEntries(S.rows)); };
-const saveOutbox = () => { if (S.user) LS.set(K.outbox(S.user.id), S.outbox); };
+function saveOutbox() {
+  if (!S.user) return true;
+  if (LS.set(K.outbox(S.user.id), S.outbox)) return true;
+  // Out of space: drop cached copies of the log (they re-download) to make room for un-uploaded bites.
+  Object.keys(localStorage).filter(k => /^bl1\.b\./.test(k)).forEach(k => LS.del(k));
+  return LS.set(K.outbox(S.user.id), S.outbox);
+}
+const boatIds = () => new Set(S.boats.map(b => b.id));
+// Outbox items for boats this person is still on (others can never upload and are shown separately on the Boat tab).
+const liveOutbox = () => { const ids = boatIds(); return S.outbox.filter(o => ids.has(o.boat_id) || !S.boats.length); };
 const saveBoats = () => { if (S.user) { LS.set(K.boats(S.user.id), S.boats); LS.set(K.boatId(S.user.id), S.boatId); } };
 
 function outboxMap() { const m = new Map(); S.outbox.forEach(o => m.set(o.id, o)); return m; }
@@ -204,9 +217,10 @@ function render() {
 
 // ------------------------------------------------------------------ header + status
 function syncState() {
-  const n = S.outbox.length;
-  const errs = S.outbox.filter(o => o.error).length;
-  const offline = navigator.onLine === false || S.authOffline || !S.sb;
+  const live = liveOutbox();
+  const n = live.length;
+  const errs = live.filter(o => o.error).length;
+  const offline = navigator.onLine === false || S.authOffline || !S.sb || (!S.syncing && !!S.lastSyncErr && isNetErr(S.lastSyncErr));
   if (errs) return ['bad', `${errs} ${errs === 1 ? 'bite needs' : 'bites need'} fixing`];
   if (offline) return [n ? 'wait' : 'bad', n ? `Offline · ${n} waiting` : 'Offline'];
   if (S.syncing) return ['wait', n ? `Uploading ${n}…` : 'Syncing…'];
@@ -218,17 +232,18 @@ function syncState() {
 function renderHeader() {
   const b = curBoat();
   $('#head-boat').textContent = b ? (b.name + (b.home_port ? ' · ' + b.home_port : '')) : '';
-  $('#head-title').textContent = S.view === 'summary' ? 'Summary' : S.view === 'boat' ? 'Boat & crew' : 'Billfish Log';
+  $('#boat-switch').classList.toggle('static', PILOT_BOAT_ONLY);
+  $('#head-title').textContent = S.view === 'summary' ? 'Summary' : S.view === 'boat' ? 'Boat & crew' : 'Fishing Log';
   const [cls, text] = syncState();
   $('#status').className = 'status ' + cls; $('#status-text').textContent = text;
 
   const ban = $('#banner'); ban.replaceChildren(); let msg = null;
-  const errs = S.outbox.filter(o => o.error);
+  const errs = liveOutbox().filter(o => o.error);
   if (errs.length) msg = [`${errs.length === 1 ? 'A bite' : errs.length + ' bites'} couldn't upload. `, `Tap the bite marked "Couldn't upload" to see why and fix it. It's kept on this phone until then.`];
   else if (S.authOffline && navigator.onLine !== false) msg = ['Signed out on the server. ', 'Your bites are safe on this phone. Sign in again to upload them.'];
   else if (S.lastSyncErr && navigator.onLine !== false && !S.syncing) msg = ['No signal right now. ', 'Keep logging. Bites are saved on this phone and upload when you get signal back.'];
   ban.hidden = !msg; if (msg) ban.append(h('b', { text: msg[0] }), msg[1]);
-  if (msg && S.authOffline && navigator.onLine !== false) ban.append(' ', h('button', { class: 'link', type: 'button', text: 'Sign in', onclick: () => { S.user = null; show('auth'); } }));
+  if (msg && S.authOffline && navigator.onLine !== false) ban.append(' ', h('button', { class: 'link', type: 'button', text: 'Sign in', onclick: startReauth }));
 
   renderInstallBanner();
 }
@@ -272,7 +287,7 @@ function rowEl(e) {
   if (e._error) pills.push(h('span', { class: 'pill err', text: "Couldn't upload" }));
   else if (e._pending) pills.push(h('span', { class: 'pill sync', text: 'Not uploaded yet' }));
   if (miss.length) pills.push(h('span', { class: 'pill need', text: 'Missing ' + miss.join(', ') }));
-  return h('button', { type: 'button', class: 'row' + (S.flashId === e.id ? ' flash' : ''), 'aria-label': `Edit ${fmtTime(e.bite_time) || ''} ${s(e.species) || 'bite'}`, onclick: () => openForm(e.id) },
+  return h('button', { type: 'button', class: 'row' + (S.flashId === e.id ? ' flash' : ''), onclick: () => openForm(e.id) },
     h('div', { class: 't' }, tm[0] || '—', h('small', { text: tm[1] || '' })),
     h('div', { class: 'main' },
       h('div', { class: 'sp', text: s(e.species) || 'Species not set' }),
@@ -407,7 +422,9 @@ function renderBoat() {
     $('#boat-name').value = s(b.name); $('#boat-port').value = s(b.home_port);
   }
 
-  // boats
+  // boats (hidden during the single-boat pilot)
+  $('#boats-card').hidden = PILOT_BOAT_ONLY && S.boats.length <= 1;
+  $('#leave-wrap').hidden = PILOT_BOAT_ONLY;
   const bl = $('#boat-list'); bl.replaceChildren();
   S.boats.forEach(x => bl.append(h('button', { type: 'button', 'aria-current': String(x.id === S.boatId), onclick: () => switchBoat(x.id) },
     h('span', { text: x.name }), h('small', { text: x.id === S.boatId ? 'Open now' : (x.role === 'captain' ? 'Captain' : 'Crew') }))));
@@ -416,9 +433,23 @@ function renderBoat() {
   $('#me-email').textContent = S.user?.email ? `Signed in as ${S.user.email}` : '';
   if (document.activeElement !== $('#me-name')) $('#me-name').value = s(S.profile?.display_name);
   const so = $('#btn-signout');
-  so.textContent = S.signoutArmed ? `Sign out anyway (${S.outbox.length} not uploaded)` : 'Sign out';
+  const offlineNow = navigator.onLine === false || !!S.lastSyncErr;
+  so.textContent = !S.signoutArmed ? 'Sign out'
+    : S.outbox.length ? `Sign out anyway (${S.outbox.length} not uploaded)`
+    : offlineNow ? "Sign out? You can't sign back in without signal" : 'Tap again to sign out';
   so.className = 'btn' + (S.signoutArmed ? ' danger' : '');
-  $('#leave-text').textContent = `Leave ${b.name}? You'll stop seeing its log. Bites you logged stay in the boat's log.`;
+  const mine = S.outbox.filter(o => o.boat_id === b.id).length;
+  $('#leave-text').textContent = `Leave ${b.name}? You'll stop seeing its log. Bites you logged stay in the boat's log.` + (mine ? ` ${mine} ${mine === 1 ? 'bite' : 'bites'} on this phone haven't uploaded yet; get signal first or they'll be lost.` : '');
+
+  // bites stuck for a boat you're no longer on
+  const ids = boatIds(); const orphans = S.outbox.filter(o => !ids.has(o.boat_id));
+  let orphanCard = $('#orphan-card'); if (orphanCard) orphanCard.remove();
+  if (orphans.length && S.boats.length) {
+    orphanCard = h('div', { class: 'card', id: 'orphan-card' }, h('h2', { text: "Bites that can't upload" }),
+      h('p', { text: `${orphans.length} ${orphans.length === 1 ? 'bite was' : 'bites were'} logged on this phone for a boat you're no longer on, so ${orphans.length === 1 ? 'it' : 'they'} can't upload.` }),
+      h('button', { class: 'btn danger', type: 'button', text: 'Discard them', onclick: () => { S.outbox = S.outbox.filter(o => ids.has(o.boat_id)); saveOutbox(); render(); toast('Discarded.'); } }));
+    $('#crew-list').closest('.card').after(orphanCard);
+  }
 
   renderInstallCard();
 }
@@ -427,10 +458,10 @@ function renderBoat() {
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 function installSteps() {
-  if (S.installEvt) return h('div', { class: 'stack' }, h('p', { text: 'Install Billfish Log so it opens from your home screen like any other app, full screen and offline.' }),
+  if (S.installEvt) return h('div', { class: 'stack' }, h('p', { text: `Install ${APP_NAME} so it opens from your home screen like any other app, full screen and offline.` }),
     h('button', { class: 'btn primary', type: 'button', text: 'Install app', onclick: async () => { const e = S.installEvt; S.installEvt = null; e.prompt(); try { await e.userChoice; } catch (x) {} render(); } }));
   if (isIOS()) return h('div', {}, h('p', { text: 'Open this page in Safari, then:' }),
-    h('ol', { class: 'steps' }, h('li', { text: 'Tap the Share button (the square with an arrow).' }), h('li', { text: 'Scroll down and tap "Add to Home Screen".' }), h('li', { text: 'Tap Add. Open Billfish Log from the new icon from now on.' })));
+    h('ol', { class: 'steps' }, h('li', { text: 'Tap the Share button (the square with an arrow).' }), h('li', { text: 'Scroll down and tap "Add to Home Screen".' }), h('li', { text: 'Tap Add. From now on, open the log from the new icon.' })));
   return h('div', {}, h('p', { text: 'In Chrome or Edge, open the browser menu and choose "Install app" or "Add to Home screen". On a computer you can also just bookmark this page.' }));
 }
 function renderInstallCard() {
@@ -445,8 +476,8 @@ function renderInstallBanner() {
   ban.hidden = !want; if (!want) return;
   ban.replaceChildren(
     h('button', { class: 'x', type: 'button', 'aria-label': 'Dismiss', text: '×', onclick: () => { LS.set(K.installDismissed, true); renderInstallBanner(); } }),
-    h('b', { text: 'Put Billfish Log on your home screen. ' }),
-    isIOS() && !S.installEvt ? 'In Safari, tap Share, then "Add to Home Screen". ' : '',
+    h('b', { text: 'Put the log on your home screen. ' }),
+    isIOS() && !S.installEvt ? (S.outbox.length ? `First let your ${S.outbox.length} un-uploaded ${S.outbox.length === 1 ? 'bite' : 'bites'} upload here (the home-screen app keeps its own storage). Then in Safari tap Share, then "Add to Home Screen". ` : 'In Safari, tap Share, then "Add to Home Screen". ') : '',
     h('button', { class: 'link', type: 'button', text: S.installEvt ? 'Install' : 'Show me how', onclick: () => { if (S.installEvt) { const e = S.installEvt; S.installEvt = null; e.prompt(); render(); } else { show('boat'); setTimeout(() => $('#install-card').scrollIntoView({ behavior: 'smooth' }), 50); } } }));
 }
 
@@ -461,8 +492,13 @@ function renderAuth() {
   $('#auth-pass').previousElementSibling.textContent = rec ? 'New password (at least 8 characters)' : up ? 'Password (at least 8 characters)' : 'Password';
   $('#auth-submit').textContent = rec ? 'Save new password' : up ? 'Create account' : 'Sign in';
   $('#auth-forgot').hidden = up || rec;
-  if (S.pendingJoin && !$('#auth-msg').textContent) setMsg('#auth-msg', `Sign in or create an account to join the boat with code ${fmtCode(S.pendingJoin)}.`, 'ok');
+  $('#auth-code-wrap').hidden = !(PILOT_BOAT_ONLY && up && !rec);
+  if (S.pendingJoin && !$('#auth-code').value) $('#auth-code').value = fmtCode(S.pendingJoin);
+  $('#auth-back').hidden = !(S.reauth && S.user);
+  if (S.authLinkErr && !$('#auth-msg').textContent) { setMsg('#auth-msg', 'That email link has expired or was already used. Sign in below, or tap "Forgot your password?" to get a new one.', 'bad'); S.authLinkErr = null; }
+  else if (S.pendingJoin && !$('#auth-msg').textContent) setMsg('#auth-msg', `Create an account (or sign in) to join the boat. The boat code ${fmtCode(S.pendingJoin)} is filled in for you.`, 'ok');
 }
+function startReauth() { S.reauth = true; S.authMode = 'in'; setMsg('#auth-msg', ''); if (S.user?.email) $('#auth-email').value = S.user.email; show('auth'); }
 async function submitAuth(ev) {
   ev.preventDefault();
   const email = $('#auth-email').value.trim(), pass = $('#auth-pass').value, name = $('#auth-name').value.trim();
@@ -480,10 +516,13 @@ async function submitAuth(ev) {
   if (!/^\S+@\S+\.\S+$/.test(email)) { setMsg('#auth-msg', 'Enter a full email address, like name@example.com.', 'bad'); $('#auth-email').focus(); return; }
   if (pass.length < (S.authMode === 'up' ? 8 : 1)) { setMsg('#auth-msg', S.authMode === 'up' ? 'Use a password of at least 8 characters.' : 'Enter your password.', 'bad'); $('#auth-pass').focus(); return; }
   if (S.authMode === 'up' && !name) { setMsg('#auth-msg', 'Enter your name so your crew knows who logged what.', 'bad'); $('#auth-name').focus(); return; }
+  const code = $('#auth-code').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (S.authMode === 'up' && PILOT_BOAT_ONLY && code.length !== 8) { setMsg('#auth-msg', "Enter the boat code from the captain's invite (8 letters and numbers, like ABCD-EFGH).", 'bad'); $('#auth-code').focus(); return; }
+  if (S.authMode === 'up' && code) { S.pendingJoin = code; LS.set(K.pendingJoin, code); }
   busy('#auth-submit', true); setMsg('#auth-msg', '');
   try {
     if (S.authMode === 'up') {
-      const { data, error } = await S.sb.auth.signUp({ email, password: pass, options: { data: { display_name: name }, emailRedirectTo: appUrl() } });
+      const { data, error } = await S.sb.auth.signUp({ email, password: pass, options: { data: { display_name: name }, emailRedirectTo: appUrl() + (S.pendingJoin ? '?join=' + S.pendingJoin : '') } });
       if (error) throw error;
       if (data.session) { await onSignedIn(data.session.user); return; }
       setMsg('#auth-msg', `Almost done. We emailed a confirmation link to ${email}. Open it, then come back and sign in.`, 'ok');
@@ -514,6 +553,10 @@ async function onSignedIn(user) {
   S.authOffline = false;
   LS.set(K.lastUser, S.user);
   if (first) loadUserCache(user.id);
+  if (S.recovery) { show('auth'); setMsg('#auth-msg', 'Choose a new password.', 'ok'); return; }
+  S.reauth = false;
+  if (!S.pendingJoin) S.pendingJoin = LS.get(K.pendingJoin, null);
+  try { navigator.storage?.persist?.().catch(() => {}); } catch (e) {}
   if (S.signingInFor === user.id) { route(); return; }
   S.signingInFor = user.id;
   try {
@@ -523,25 +566,37 @@ async function onSignedIn(user) {
   if (S.view === 'auth' || S.view === 'loading' || (S.view === 'onboard' && S.boats.length)) S.view = 'log';
   route();
   restoreDraft();
-  subscribeRealtime();
+  stopRealtime(); subscribeRealtime();
+  S.ready = true;
   syncNow();
 }
 function handleSignedOut() {
   stopRealtime();
   S.user = null; S.boats = []; S.boatId = null; S.rows = new Map(); S.outbox = []; S.crew = []; S.profile = null;
-  S.lastSyncAt = null; S.lastSyncErr = null; S.signoutArmed = false;
+  S.lastSyncAt = null; S.lastSyncErr = null; S.signoutArmed = false; S.recovery = false; S.reauth = false; S.ready = false;
   LS.del(K.lastUser);
   show('auth');
 }
 async function signOut() {
-  if (S.outbox.length && !S.signoutArmed) { S.signoutArmed = true; renderBoat(); toast(`${S.outbox.length} ${S.outbox.length === 1 ? 'bite has' : 'bites have'} not uploaded. They stay on this phone and upload when you sign back in.`, 6000); return; }
+  if (!S.signoutArmed) {
+    S.signoutArmed = true; renderBoat();
+    if (S.outbox.length) toast(`${S.outbox.length} ${S.outbox.length === 1 ? 'bite has' : 'bites have'} not uploaded. They stay on this phone and upload when you sign back in.`, 6000);
+    setTimeout(() => { if (S.signoutArmed) { S.signoutArmed = false; if (S.view === 'boat') renderBoat(); } }, 8000);
+    return;
+  }
   const uid = S.user?.id;
   if (uid) { // forget cached boat data on this device; keep any un-uploaded bites
     (LS.get(K.boats(uid), []) || []).forEach(b => { LS.del(K.rows(b.id)); LS.del(K.cursor(b.id)); LS.del(K.crew(b.id)); });
     LS.del(K.boats(uid)); LS.del(K.boatId(uid)); LS.del(K.profile(uid)); LS.del(K.draft(uid));
   }
-  try { await S.sb?.auth.signOut({ scope: 'local' }); } catch (e) {}
+  let ok = false;
+  try {
+    const r = await Promise.race([S.sb?.auth.signOut({ scope: 'local' }), new Promise(res => setTimeout(() => res({ error: 'timeout' }), 8000))]);
+    ok = !r?.error;
+  } catch (e) {}
+  if (!ok) { LS.del('bl1.auth'); LS.del('bl1.auth-code-verifier'); }
   handleSignedOut();
+  if (!ok) location.reload(); // reset the client's in-memory session when the server couldn't be told
 }
 
 // ------------------------------------------------------------------ account + boats
@@ -557,7 +612,7 @@ async function refreshAccount() {
     if (S.user?.id !== uid) return;
     S.profile = p.data || { id: uid, display_name: '' }; LS.set(K.profile(uid), S.profile);
     S.boats = (m.data || []).filter(r => r.boats).map(r => ({ ...r.boats, role: r.role })).sort((a, b) => s(a.name).localeCompare(s(b.name)));
-    if (!S.boats.some(b => b.id === S.boatId)) { S.boatId = S.boats[0]?.id || null; loadBoatCache(); subscribeRealtime(); }
+    if (!S.boats.some(b => b.id === S.boatId)) { S.boatId = S.boats[0]?.id || null; loadBoatCache(); stopRealtime(); subscribeRealtime(); S.lastSyncAt = null; }
     saveBoats();
     await refreshCrew();
   } catch (e) {
@@ -579,6 +634,8 @@ async function refreshCrew() {
   if (bid !== S.boatId) return;
   S.crew = (mem || []).map(m => ({ user_id: m.user_id, role: m.role, name: s(names[m.user_id]) }));
   LS.set(K.crew(bid), S.crew);
+  const mine = S.crew.find(c => c.user_id === S.user?.id), cb = curBoat();
+  if (mine && cb && cb.role !== mine.role) { cb.role = mine.role; saveBoats(); }
   render();
 }
 function switchBoat(id) {
@@ -593,8 +650,12 @@ async function joinBoat(code, quiet) {
   if (clean.length !== 8) { setMsg('#join-msg', 'Invite codes are 8 letters and numbers, like ABCD-EFGH.', 'bad'); return false; }
   if (!S.sb) { setMsg('#join-msg', 'Joining a boat needs signal.', 'bad'); return false; }
   const { data, error } = await q(S.sb.rpc('join_boat', { p_code: clean }));
-  S.pendingJoin = null;
-  if (error) { const m = friendly(error); setMsg('#join-msg', m, 'bad'); if (quiet) toast(m, 5000); return false; }
+  if (error && isNetErr(error)) { setMsg('#join-msg', friendly(error), 'bad'); return false; } // keep the code to retry
+  S.pendingJoin = null; LS.del(K.pendingJoin);
+  if (error || !data) {
+    const m = error ? friendly(error) : "That boat code isn't right. Check it with your captain and try again.";
+    setMsg('#join-msg', m, 'bad'); $('#join-code').value = fmtCode(clean); if (quiet) toast(m, 6000); return false;
+  }
   await refreshAccount();
   if (data && S.boats.some(b => b.id === data)) { S.boatId = data; saveBoats(); loadBoatCache(); stopRealtime(); subscribeRealtime(); refreshCrew().catch(() => {}); }
   toast(`You're on the crew of ${curBoat()?.name || 'the boat'}.`);
@@ -620,6 +681,9 @@ async function createBoat(ev) {
 }
 function renderOnboard() {
   $('#ob-back').hidden = !S.boats.length;
+  $('#create-form').hidden = PILOT_BOAT_ONLY;
+  $('#ob-title').textContent = PILOT_BOAT_ONLY ? 'Join the boat' : 'Set up your boat';
+  if (!$('#join-code').value && S.pendingJoin) $('#join-code').value = fmtCode(S.pendingJoin);
   $('#ob-hello').textContent = S.profile?.display_name ? `Welcome aboard, ${S.profile.display_name}` : 'Welcome aboard';
 }
 async function rpcAction(fn, args, okMsg) {
@@ -635,12 +699,18 @@ async function setRole(c, role) {
   }
 }
 async function removeMember(c) {
-  if (await rpcAction('remove_member', { p_boat: S.boatId, p_user: c.user_id }, `${c.name || 'They'} were removed from the boat.`)) await refreshCrew().catch(() => {});
+  const r = await rpcAction('remove_member', { p_boat: S.boatId, p_user: c.user_id }, `${c.name || 'They'} ${c.name ? 'was' : 'were'} removed. The boat code was changed so the old invite no longer works.`);
+  if (r) {
+    const b = curBoat(); if (b && r.data) { b.invite_code = r.data; saveBoats(); }
+    await refreshCrew().catch(() => {}); renderBoat();
+  }
 }
 async function leaveBoat() {
   const b = curBoat(); if (!b) return;
+  if (S.outbox.some(o => o.boat_id === b.id) && navigator.onLine !== false) { await syncNow(); }
   if (await rpcAction('remove_member', { p_boat: b.id, p_user: S.user.id }, `You left ${b.name}.`)) {
     LS.del(K.rows(b.id)); LS.del(K.cursor(b.id)); LS.del(K.crew(b.id));
+    S.outbox = S.outbox.filter(o => o.boat_id !== b.id); saveOutbox();
     S.boats = S.boats.filter(x => x.id !== b.id); S.boatId = S.boats[0]?.id || null; saveBoats(); loadBoatCache(); stopRealtime(); subscribeRealtime();
     $('#leave-confirm').hidden = true;
     S.view = 'log'; route(); syncNow();
@@ -655,8 +725,9 @@ async function saveAnglers(list) {
   if (navigator.onLine === false) { toast('Changing the angler buttons needs signal.'); return; }
   const clean = [...new Set(list.map(x => s(x).trim().slice(0, 40)).filter(Boolean))].slice(0, 30);
   const settings = { ...(b.settings || {}), anglers: clean };
-  const { error } = await q(S.sb.from('boats').update({ settings }).eq('id', b.id));
+  const { data, error } = await q(S.sb.from('boats').update({ settings }).eq('id', b.id).select('id'));
   if (error) { toast(friendly(error), 5000); return; }
+  if (!data?.length) { toast('Only a captain can change that. Your role may have changed.', 5000); refreshAccount(); return; }
   b.settings = settings; saveBoats(); renderBoat();
 }
 async function saveBoatDetails(ev) {
@@ -665,8 +736,9 @@ async function saveBoatDetails(ev) {
   const name = $('#boat-name').value.trim(), port = $('#boat-port').value.trim();
   if (!name) { setMsg('#boat-msg', 'The boat needs a name.', 'bad'); return; }
   if (!S.sb || navigator.onLine === false) { setMsg('#boat-msg', 'Saving boat details needs signal.', 'bad'); return; }
-  const { error } = await q(S.sb.from('boats').update({ name, home_port: port }).eq('id', b.id));
+  const { data, error } = await q(S.sb.from('boats').update({ name, home_port: port }).eq('id', b.id).select('id'));
   if (error) { setMsg('#boat-msg', friendly(error), 'bad'); return; }
+  if (!data?.length) { setMsg('#boat-msg', 'Only a captain can change that. Your role may have changed.', 'bad'); refreshAccount(); return; }
   b.name = name; b.home_port = port; saveBoats(); setMsg('#boat-msg', 'Saved.', 'ok'); render();
 }
 async function saveMyName(ev) {
@@ -682,9 +754,9 @@ async function saveMyName(ev) {
 async function shareInvite() {
   const b = curBoat(); if (!b) return;
   const link = `${appUrl()}?join=${encodeURIComponent(b.invite_code)}`;
-  const text = `Join ${b.name} on Billfish Log so we all log bites in one place. Invite code: ${fmtCode(b.invite_code)}`;
+  const text = `Join the ${b.name} fishing log so we all log bites in one place. Tap the link, create an account, and you're in. Boat code: ${fmtCode(b.invite_code)}`;
   if (navigator.share) {
-    try { await navigator.share({ title: `Join ${b.name} on Billfish Log`, text, url: link }); return; }
+    try { await navigator.share({ title: `Join the ${b.name} fishing log`, text, url: link }); return; }
     catch (e) { if (e && e.name === 'AbortError') return; }
   }
   copyText(`${text}\n${link}`, 'Invite link copied. Paste it into a text to your crew.');
@@ -703,7 +775,7 @@ function queueRow(row) {
   const item = { id: row.id, boat_id: row.boat_id, row, error: null, queuedAt: new Date().toISOString() };
   const i = S.outbox.findIndex(o => o.id === row.id);
   if (i >= 0) S.outbox[i] = item; else S.outbox.push(item);
-  saveOutbox();
+  return saveOutbox();
 }
 async function syncNow() {
   if (!S.sb || !S.user || S.authOffline) { render(); return; }
@@ -717,15 +789,16 @@ async function syncNow() {
       if (navigator.onLine !== false) S.authOffline = true;
       return;
     }
+    if (!S.channel) subscribeRealtime();
     await pushOutbox();
     if (S.boatId) await pullBoat(S.boatId);
     S.lastSyncAt = Date.now(); S.lastSyncErr = null;
   } catch (e) {
     S.lastSyncErr = e;
     if (!isNetErr(e)) console.warn('sync', e);
-    if (/jwt|expired|not authenticated/i.test(s(e?.message))) {
-      const { data } = await S.sb.auth.refreshSession().catch(() => ({ data: null }));
-      if (!data?.session && navigator.onLine !== false) S.authOffline = true;
+    if (/jwt|expired|not authenticated/i.test(s(e?.message)) || e?.status === 401) {
+      const r = await S.sb.auth.refreshSession().catch(err => ({ data: null, error: err }));
+      if (!r?.data?.session && r?.error && !isNetErr(r.error) && navigator.onLine !== false) S.authOffline = true;
     }
   } finally {
     S.syncing = false;
@@ -736,14 +809,16 @@ async function syncNow() {
 function renderHeaderIfMain() { if (MAIN_VIEWS.includes(S.view)) renderHeader(); }
 async function pushOutbox() {
   for (const item of S.outbox.slice()) {
-    if (item.error && item.errorRow === item.row) continue; // already rejected; waits for the user to fix it
+    if (item.rejected) continue; // the server refused this version; it waits for the user to fix it
+    if (!boatIds().has(item.boat_id) && S.boats.length) continue; // boat no longer ours; shown on the Boat tab
     const payload = {};
     ROW_COLS.forEach(k => { payload[k] = item.row[k] === undefined ? null : item.row[k]; });
     payload.id = item.id; payload.boat_id = item.boat_id;
-    const { error } = await q(S.sb.from('catches').upsert(payload, { onConflict: 'id' }));
+    const { error, status } = await q(S.sb.from('catches').upsert(payload, { onConflict: 'id' }));
     if (error) {
-      if (isNetErr(error) || /jwt|expired/i.test(s(error.message))) throw error;
-      item.error = friendly(error); item.errorRow = item.row; saveOutbox();
+      // Signal problems, server hiccups and expired sign-ins are temporary: keep the bite queued and try later.
+      if (isNetErr(error) || !error.code || status === 0 || status === 401 || status === 408 || status === 429 || status >= 500 || /jwt|expired/i.test(s(error.message))) throw error;
+      item.error = friendly(error); item.rejected = true; saveOutbox();
       continue;
     }
     const i = S.outbox.indexOf(item);
@@ -752,6 +827,10 @@ async function pushOutbox() {
       if (item.boat_id === S.boatId) {
         if (item.row.deleted_at) S.rows.delete(item.id); else S.rows.set(item.id, { ...item.row });
         saveRows();
+      } else {
+        const m = LS.get(K.rows(item.boat_id), {}) || {};
+        if (item.row.deleted_at) delete m[item.id]; else m[item.id] = { ...item.row };
+        LS.set(K.rows(item.boat_id), m);
       }
     }
   }
@@ -759,26 +838,30 @@ async function pushOutbox() {
 async function pullBoat(bid) {
   const cursor = LS.get(K.cursor(bid), null);
   const since = cursor ? new Date(parseTs(cursor) - 5 * 60 * 1000).toISOString() : null;
-  const rows = bid === S.boatId ? S.rows : new Map(Object.entries(LS.get(K.rows(bid), {}) || {}));
+  const gen = S.gen, cur = bid === S.boatId;
+  const rows = cur ? S.rows : new Map(Object.entries(LS.get(K.rows(bid), {}) || {}));
   const pending = outboxMap();
+  const PAGE = 250;
   let maxTs = cursor, from = 0;
-  for (let page = 0; page < 100; page++) {
-    let qb = S.sb.from('catches').select('*').eq('boat_id', bid).order('updated_at', { ascending: true }).order('id', { ascending: true }).range(from, from + 999);
+  for (let page = 0; page < 400; page++) {
+    let qb = S.sb.from('catches').select('*').eq('boat_id', bid).order('updated_at', { ascending: true }).order('id', { ascending: true }).range(from, from + PAGE - 1);
     if (since) qb = qb.gte('updated_at', since);
     else qb = qb.is('deleted_at', null);
     const { data, error } = await q(qb, 30000);
     if (error) throw error;
+    if (cur && gen !== S.gen) { S.syncAgain = true; return; } // switched boats mid-pull; start over later
     for (const r of data) {
       if (!maxTs || parseTs(r.updated_at) > parseTs(maxTs)) maxTs = r.updated_at;
       if (pending.has(r.id)) continue; // this phone's newer edit wins until it uploads
       if (r.deleted_at) rows.delete(r.id); else rows.set(r.id, r);
     }
-    if (data.length < 1000) break;
-    from += 1000;
+    // Save as we go so a dropped connection on a big first download doesn't start over from zero.
+    if (LS.set(K.rows(bid), Object.fromEntries(rows))) { if (maxTs) LS.set(K.cursor(bid), maxTs); }
+    else LS.del(K.cursor(bid));
+    if (cur && S.view === 'log') renderLog();
+    if (data.length < PAGE) break;
+    from += PAGE;
   }
-  if (bid !== S.boatId && rows === S.rows) return;
-  LS.set(K.rows(bid), Object.fromEntries(rows));
-  if (maxTs) LS.set(K.cursor(bid), maxTs);
 }
 function subscribeRealtime() {
   if (!S.sb || !S.boatId || S.channel) return;
@@ -870,13 +953,15 @@ function openForm(id, draft) {
   if (f.carried) $('#carry-text').textContent = `Tide, location, water temp and seas copied from the ${f.carried} bite.`;
   $('#del-zone').hidden = !f.id; $('#del-confirm').hidden = true; $('#btn-del').hidden = false;
   fillDatalists(); setFormFields(); updateMissing();
-  if (f.error) $('#missing-note').textContent = `Couldn't upload: ${f.error} Fix it and save again.`;
+  $('#discard-confirm').hidden = true;
   show('form'); window.scrollTo(0, 0);
   saveDraft();
+  if (!f.orig) f.orig = JSON.stringify(f.data);
 }
 function updateMissing() {
   const miss = missing(S.form.data);
-  $('#missing-note').textContent = miss.length ? `Still missing: ${miss.join(', ')}. You can save now and fill it in later.` : '';
+  $('#missing-note').textContent = (S.form.error ? `Couldn't upload: ${S.form.error} Fix it and save again. ` : '')
+    + (miss.length ? `Still missing: ${miss.join(', ')}. You can save now and fill it in later.` : '');
 }
 let draftTimer = null;
 function formChanged() { updateMissing(); clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300); }
@@ -889,7 +974,13 @@ function restoreDraft() {
     openForm(null, d); toast('Picked up your unsaved bite.');
   }
 }
-function closeForm() { if (S.user) LS.del(K.draft(S.user.id)); S.form = null; show('log'); }
+function closeForm(force) {
+  if (S.form && force !== true) {
+    readFormFields();
+    if (S.form.orig && JSON.stringify(S.form.data) !== S.form.orig) { $('#discard-confirm').hidden = false; $('#discard-confirm').scrollIntoView({ block: 'nearest' }); return; }
+  }
+  if (S.user) LS.del(K.draft(S.user.id)); S.form = null; show('log');
+}
 function fieldError(k, msg) {
   const el = $('#f-' + k); el.setAttribute('aria-invalid', 'true');
   const fld = el.closest('.fld'); fld.querySelector('.err')?.remove();
@@ -902,7 +993,8 @@ function saveForm() {
   TEXT_FIELDS.forEach(k => { const el = $('#f-' + k); el.removeAttribute('aria-invalid'); el.closest('.fld').querySelector('.err')?.remove(); });
   for (const [k, max] of Object.entries(MAXLEN)) { const v = s(src[k]).trim(); row[k] = v ? v.slice(0, max) : null; }
   for (const [k, [lo, hi, label]] of Object.entries(NUMS)) {
-    const raw = s(src[k]).trim().replace(/,/g, '');
+    const raw0 = s(src[k]).trim();
+    const raw = /^\d*,\d{1,2}$/.test(raw0) ? raw0.replace(',', '.') : raw0.replace(/,/g, ''); // "79,5" is a decimal; "1,200" is a thousand
     if (!raw) { row[k] = null; continue; }
     const n = Number(raw);
     if (!Number.isFinite(n)) { fieldError(k, `${label} must be a number.`); firstBad = firstBad || k; continue; }
@@ -918,7 +1010,10 @@ function saveForm() {
   row.id = f.id || uuid();
   row.boat_id = f.boat_id || S.boatId;
   row.created_at = src.created_at || new Date().toISOString();
-  queueRow(row);
+  if (!queueRow(row)) {
+    toast("This phone is out of storage, so the bite couldn't be saved. Free up space (delete photos or apps), then tap Save again.", 9000);
+    return;
+  }
   S.flashId = row.id;
   if (S.user) LS.del(K.draft(S.user.id));
   const offline = navigator.onLine === false || !S.sb || S.authOffline || !!S.lastSyncErr;
@@ -945,13 +1040,16 @@ function renderGps() {
 function markGps() {
   if (!navigator.geolocation) { toast("This device can't share its position."); return; }
   const btn = $('#btn-gps'); btn.disabled = true; $('#gps-coords').textContent = 'Finding position…';
+  const f = S.form;
   navigator.geolocation.getCurrentPosition(pos => {
     btn.disabled = false;
-    if (!S.form) return;
+    if (!f || S.form !== f) return;
     S.form.data.lat = Math.round(pos.coords.latitude * 1e6) / 1e6; S.form.data.lng = Math.round(pos.coords.longitude * 1e6) / 1e6;
     renderGps(); formChanged();
   }, err => {
-    btn.disabled = false; renderGps();
+    btn.disabled = false;
+    if (!f || S.form !== f) return;
+    renderGps();
     toast(err.code === 1 ? 'Location is turned off for this app. Allow it in your phone settings to mark GPS.' : "Couldn't get a GPS fix. Try again in open sky.", 5000);
   }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
 }
@@ -963,6 +1061,7 @@ function wire() {
   $('#auth-tab-up').addEventListener('click', () => { S.authMode = 'up'; setMsg('#auth-msg', ''); renderAuth(); });
   $('#auth-form').addEventListener('submit', submitAuth);
   $('#auth-forgot').addEventListener('click', forgotPassword);
+  $('#auth-back').addEventListener('click', () => { S.reauth = false; setMsg('#auth-msg', ''); S.view = 'log'; route(); });
   // onboarding
   $('#join-form').addEventListener('submit', ev => { ev.preventDefault(); joinBoat($('#join-code').value); });
   $('#create-form').addEventListener('submit', createBoat);
@@ -970,9 +1069,9 @@ function wire() {
   $('#ob-signout').addEventListener('click', signOut);
   // main
   $$('.tab').forEach(b => b.addEventListener('click', () => { show(b.dataset.v); window.scrollTo(0, 0); if (b.dataset.v === 'boat') refreshCrew().catch(() => {}); }));
-  $('#boat-switch').addEventListener('click', () => { show('boat'); setTimeout(() => $('#boat-list').scrollIntoView({ behavior: 'smooth', block: 'center' }), 50); });
+  $('#boat-switch').addEventListener('click', () => { if (PILOT_BOAT_ONLY && S.boats.length <= 1) return; show('boat'); setTimeout(() => $('#boat-list').scrollIntoView({ behavior: 'smooth', block: 'center' }), 50); });
   $('#status').addEventListener('click', () => {
-    if (S.authOffline && navigator.onLine !== false) { S.user = null; show('auth'); return; }
+    if (S.authOffline && navigator.onLine !== false) { startReauth(); return; }
     if (navigator.onLine === false) { toast(S.outbox.length ? `No signal. ${S.outbox.length} waiting on this phone; they upload when you get signal.` : 'No signal. The log still works; new bites upload later.'); return; }
     toast('Syncing…', 1500); syncNow();
   });
@@ -994,8 +1093,10 @@ function wire() {
   $('#leave-no').addEventListener('click', () => { $('#leave-confirm').hidden = true; });
   $('#leave-yes').addEventListener('click', leaveBoat);
   // form
-  $('#btn-back').addEventListener('click', closeForm);
-  $('#btn-cancel').addEventListener('click', closeForm);
+  $('#btn-back').addEventListener('click', () => closeForm());
+  $('#btn-cancel').addEventListener('click', () => closeForm());
+  $('#discard-no').addEventListener('click', () => { $('#discard-confirm').hidden = true; });
+  $('#discard-yes').addEventListener('click', () => closeForm(true));
   $('#btn-save').addEventListener('click', saveForm);
   $('#btn-now').addEventListener('click', () => { $('#f-catch_date').value = todayISO(); $('#f-bite_time').value = nowHM(); formChanged(); });
   $('#carry-clear').addEventListener('click', () => {
@@ -1008,7 +1109,7 @@ function wire() {
     formChanged();
   }));
   $('#btn-gps').addEventListener('click', markGps);
-  $('#gps-clear').addEventListener('click', () => { S.form.data.lat = ''; S.form.data.lng = ''; renderGps(); formChanged(); });
+  $('#gps-clear').addEventListener('click', () => { if (!S.form) return; S.form.data.lat = ''; S.form.data.lng = ''; renderGps(); formChanged(); });
   $('#btn-del').addEventListener('click', () => {
     $('#del-text').textContent = `Delete the ${fmtTime(S.form.data.bite_time) || ''} ${s(S.form.data.species) || 'bite'}? Everyone on the boat stops seeing it.`.replace(/\s+/g, ' ');
     $('#del-confirm').hidden = false; $('#btn-del').hidden = true;
@@ -1032,19 +1133,25 @@ function registerSW() {
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloading) return;
-    if (S.view === 'form') return; // never reload in the middle of logging a bite
+    if (S.view === 'form' || S.view === 'auth') return; // never reload in the middle of logging a bite or signing in
     reloading = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(e => console.warn('service worker', e));
 }
 
 async function boot() {
-  wire();
   registerSW();
+  wire();
   const params = new URLSearchParams(location.search);
   const join = params.get('join');
-  if (join) { S.pendingJoin = join.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8); $('#join-code').value = fmtCode(S.pendingJoin); }
-  if (join || params.has('code')) history.replaceState(null, '', location.pathname + location.hash);
+  if (join) { S.pendingJoin = join.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8); LS.set(K.pendingJoin, S.pendingJoin); }
+  else S.pendingJoin = LS.get(K.pendingJoin, null);
+  if (S.pendingJoin) { $('#join-code').value = fmtCode(S.pendingJoin); $('#auth-code').value = fmtCode(S.pendingJoin); S.authMode = 'up'; }
+  if (join) history.replaceState(null, '', location.pathname + location.hash);
+  // Email links: a password-reset link carries type=recovery; an expired link carries error_code.
+  const hp = new URLSearchParams(location.hash.slice(1));
+  if (hp.get('type') === 'recovery') { S.recovery = true; S.authMode = 'in'; }
+  if (hp.get('error_code')) { S.authLinkErr = hp.get('error_code'); S.authMode = 'in'; history.replaceState(null, '', location.pathname + location.search); }
 
   // Offline-first: show the last signed-in person's cached log straight away.
   const last = LS.get(K.lastUser, null);
@@ -1054,23 +1161,26 @@ async function boot() {
   if (!lib || !lib.createClient) { S.authOffline = !!last; if (!last) show('auth'); render(); return; }
   S.sb = lib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: 'bl1.auth' },
-    global: { fetch: (...args) => window.fetch(...args) }, // look up fetch at call time (lets tests simulate no signal)
+    // Look up fetch at call time (lets tests simulate no signal) and give every request a deadline,
+    // so a connection that hangs offshore can't freeze syncing or the sign-in buttons.
+    global: { fetch: (url, opts = {}) => window.fetch(url, { ...opts, signal: opts.signal || timeoutSignal(25000) }) },
   });
   S.sb.auth.onAuthStateChange((event, session) => {
     // run outside the auth callback (calling Supabase inside it can deadlock)
     setTimeout(() => {
       if (event === 'PASSWORD_RECOVERY') { S.recovery = true; S.authMode = 'in'; show('auth'); setMsg('#auth-msg', 'Choose a new password.', 'ok'); return; }
       if (event === 'SIGNED_OUT') { if (S.user) handleSignedOut(); return; }
-      if (session?.user && event === 'SIGNED_IN' && (!S.user || S.user.id !== session.user.id || S.authOffline)) onSignedIn(session.user);
+      if (session?.user && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && (!S.user || S.user.id !== session.user.id || S.authOffline || !S.ready)) onSignedIn(session.user);
     }, 0);
   });
   let session = null, err = null;
   try { const r = await S.sb.auth.getSession(); session = r.data?.session || null; err = r.error || null; }
   catch (e) { err = e; }
-  if (S.recovery) return;
+  if (session && S.recovery) { show('auth'); setMsg('#auth-msg', 'Choose a new password.', 'ok'); return; }
   if (session) { await onSignedIn(session.user); return; }
   if (last && (err || navigator.onLine === false)) { S.authOffline = isNetErr(err) || navigator.onLine === false ? false : true; render(); return; }
   if (last) { S.authOffline = true; render(); return; } // keep their offline bites visible; banner asks them to sign in
+  if (S.authLinkErr) S.authMode = 'in';
   show('auth');
 }
 
