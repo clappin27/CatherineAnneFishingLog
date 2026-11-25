@@ -495,6 +495,7 @@ function renderAuth() {
   $('#auth-code-wrap').hidden = !(PILOT_BOAT_ONLY && up && !rec);
   if (S.pendingJoin && !$('#auth-code').value) $('#auth-code').value = fmtCode(S.pendingJoin);
   $('#auth-back').hidden = !(S.reauth && S.user);
+  $('#auth-hint').hidden = !(isStandalone() && !up && !rec && !S.reauth);
   if (S.authLinkErr && !$('#auth-msg').textContent) { setMsg('#auth-msg', 'That email link has expired or was already used. Sign in below, or tap "Forgot your password?" to get a new one.', 'bad'); S.authLinkErr = null; }
   else if (S.pendingJoin && !$('#auth-msg').textContent) setMsg('#auth-msg', `Create an account (or sign in) to join the boat. The boat code ${fmtCode(S.pendingJoin)} is filled in for you.`, 'ok');
 }
