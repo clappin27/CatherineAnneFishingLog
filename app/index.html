@@ -122,6 +122,131 @@
   <div class="spacer"></div>
 </section>
 
+<!-- FISHING DAYS -->
+<section id="v-days" class="wrap" hidden>
+  <div class="today">
+    <div class="today-head"><h2>Fishing days</h2></div>
+    <p class="note" id="d-season" style="margin:6px 0 0"></p>
+    <button class="big-btn" id="btn-new-day" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      Log a fishing day
+    </button>
+  </div>
+  <div id="days-area"></div>
+  <div class="spacer"></div>
+</section>
+
+<!-- FISHING DAY FORM -->
+<section id="v-dayform" class="wrap" hidden>
+  <div class="form-top">
+    <button class="back" id="day-back" type="button" aria-label="Cancel and go back">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Back
+    </button>
+    <h2 id="day-title">New fishing day</h2>
+  </div>
+  <div class="grp">
+    <div class="fld"><label for="d-date">Date</label><input type="date" id="d-date"></div>
+  </div>
+  <div class="grp"><div class="grp-label" id="lb-d-type">Type of fishing</div><div class="chips" id="d-type" role="group" aria-labelledby="lb-d-type"></div></div>
+  <div class="grp">
+    <div class="grp-label" id="lb-d-tally">Fish caught</div>
+    <p class="note" style="margin:0 0 8px">Tap + for each fish. Count everything you landed, kept or released.</p>
+    <div class="tally-list" id="d-tally" role="group" aria-labelledby="lb-d-tally"></div>
+    <form class="inline-add" id="d-addfish-form" novalidate style="margin-top:10px">
+      <div class="fld"><label for="d-addfish">Another kind of fish</label><input id="d-addfish" maxlength="60" autocomplete="off" placeholder="e.g. Tilefish"></div>
+      <button class="btn" type="submit">Add</button>
+    </form>
+  </div>
+  <div class="grp">
+    <div class="fld"><label for="d-location">Area</label><input id="d-location" list="dl-loc" autocomplete="off" maxlength="120" placeholder="Ledge, numbers or area"></div>
+  </div>
+  <div class="grp">
+    <div class="grp-label" id="lb-d-crew">Crew aboard</div>
+    <div class="chips" id="d-crew" role="group" aria-labelledby="lb-d-crew"></div>
+    <div class="fld" style="margin-top:10px"><label for="d-crew-other">Someone else (guest)</label><input id="d-crew-other" maxlength="60" autocomplete="off"></div>
+  </div>
+  <div class="grp">
+    <div class="grp-label" id="lb-d-seas">Sea conditions</div>
+    <div class="chips" id="d-seas" role="group" aria-labelledby="lb-d-seas"></div>
+    <div class="fld unit" style="margin-top:12px"><label for="d-temp">Water temp</label><input id="d-temp" inputmode="decimal" autocomplete="off"><span>°F</span></div>
+  </div>
+  <div class="grp">
+    <div class="grp-label" id="lb-d-photos">Photos</div>
+    <div class="fthumbs" id="d-photos"></div>
+    <button class="btn" type="button" id="btn-d-photo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-4px;margin-right:6px"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Add photo
+    </button>
+    <input type="file" id="d-photo-input" accept="image/*" multiple hidden>
+  </div>
+  <div class="grp">
+    <div class="fld"><label for="d-notes">Notes</label><textarea id="d-notes" maxlength="4000" placeholder="Where they were, what they ate, weed lines, birds…"></textarea></div>
+  </div>
+  <div class="del-zone" id="day-del-zone" hidden>
+    <button class="btn danger" id="day-del" type="button" style="width:100%">Delete this fishing day</button>
+    <div class="confirm" id="day-del-confirm" hidden>
+      <p>Delete this fishing day for everyone on the boat?</p>
+      <div class="acts"><button class="btn" type="button" id="day-del-no">Keep it</button><button class="btn danger-solid" type="button" id="day-del-yes">Delete</button></div>
+    </div>
+  </div>
+  <div class="savebar">
+    <div class="missing-note" id="day-note"></div>
+    <div class="confirm" id="day-discard" hidden style="grid-column:1/-1;margin:0">
+      <p>Throw away this fishing day? What you entered will be lost.</p>
+      <div class="acts"><button class="btn" type="button" id="day-discard-no">Keep editing</button><button class="btn danger-solid" type="button" id="day-discard-yes">Throw away</button></div>
+    </div>
+    <button class="btn" id="day-cancel" type="button">Cancel</button>
+    <button class="big-btn" id="day-save" type="button">Save day</button>
+  </div>
+</section>
+
+<!-- PHOTOS -->
+<section id="v-photos" class="wrap" hidden>
+  <button class="big-btn photo-add" id="btn-add-photos" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+    Add photos
+  </button>
+  <input type="file" id="photo-input" accept="image/*" multiple hidden>
+  <p class="note" id="photos-note">Billfish, mahi, tuna, wahoo: any fish the crew catches. Everyone on the boat sees them.</p>
+  <div id="photo-area"></div>
+  <div class="spacer"></div>
+</section>
+
+<!-- ONE PHOTO -->
+<section id="v-photo" class="wrap" hidden>
+  <div class="form-top">
+    <button class="back" id="pv-back" type="button" aria-label="Back to photos">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Back
+    </button>
+    <h2 id="pv-title">Photo</h2>
+    <span class="pv-count" id="pv-count"></span>
+  </div>
+  <div class="pv-stage">
+    <img id="pv-img" alt="">
+    <button class="pv-nav prev" id="pv-prev" type="button" aria-label="Previous photo">&#8249;</button>
+    <button class="pv-nav next" id="pv-next" type="button" aria-label="Next photo">&#8250;</button>
+  </div>
+  <p class="note" id="pv-meta" style="margin-top:8px"></p>
+  <button class="link" type="button" id="pv-bite" hidden></button>
+  <div class="grp">
+    <div class="grp-label" id="lb-pv-fish">What's the fish?</div>
+    <div class="chips" id="pv-fish" role="group" aria-labelledby="lb-pv-fish"></div>
+    <div class="fld" style="margin-top:12px"><label for="pv-other">Something else? Type the fish</label><input id="pv-other" maxlength="60" autocomplete="off" placeholder="e.g. Tilefish"></div>
+    <div class="fld" style="margin-top:12px"><label for="pv-caption">Caption</label><input id="pv-caption" maxlength="300" autocomplete="off" placeholder="e.g. Mason's first sail, released boatside"></div>
+  </div>
+  <div class="btns" style="margin-top:12px">
+    <button class="btn primary" type="button" id="pv-save">Save</button>
+    <button class="btn" type="button" id="pv-share">Save to phone / share</button>
+  </div>
+  <div class="del-zone">
+    <button class="btn danger" id="pv-del" type="button" style="width:100%">Delete photo</button>
+    <div class="confirm" id="pv-del-confirm" hidden>
+      <p>Delete this photo for everyone on the boat?</p>
+      <div class="acts"><button class="btn" type="button" id="pv-del-no">Keep it</button><button class="btn danger-solid" type="button" id="pv-del-yes">Delete</button></div>
+    </div>
+  </div>
+  <div class="spacer"></div>
+</section>
+
 <!-- BOAT -->
 <section id="v-boat" class="wrap" hidden>
   <div class="card" id="invite-card">
@@ -227,6 +352,15 @@
   </div>
   <div class="grp"><div class="grp-label" id="lb-tide">Tide <span class="must">Must fill</span></div><div class="chips" data-field="tide" role="group" aria-labelledby="lb-tide"></div></div>
 
+  <div class="grp">
+    <div class="grp-label" id="lb-f-photos">Photos</div>
+    <div class="fthumbs" id="f-photos"></div>
+    <button class="btn" type="button" id="btn-f-photo">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-4px;margin-right:6px"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Add photo
+    </button>
+    <input type="file" id="f-photo-input" accept="image/*" multiple hidden>
+  </div>
+
   <div class="divider">If you know it<small>A partial entry is still useful. Skip anything you don't know.</small></div>
 
   <div class="grp">
@@ -277,7 +411,13 @@
 <nav class="tabs" id="tabs" aria-label="Sections" hidden>
   <div class="in">
     <button class="tab" type="button" data-v="log">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1.2" fill="currentColor"/><circle cx="4" cy="12" r="1.2" fill="currentColor"/><circle cx="4" cy="18" r="1.2" fill="currentColor"/></svg>Log
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12h5"/><path d="M7 12c2-4 6-6 10-5l-2 3 4 2-4 2 2 3c-4 1-8-1-10-5z"/><path d="M10 8l1-4 3 3.5"/></svg>Billfish
+    </button>
+    <button class="tab" type="button" data-v="days">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>Fishing
+    </button>
+    <button class="tab" type="button" data-v="photos">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Photos
     </button>
     <button class="tab" type="button" data-v="summary">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 20V11M12 20V4M19 20v-6"/></svg>Summary

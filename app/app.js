@@ -34,6 +34,15 @@ const ROW_COLS = ['id', 'boat_id', 'catch_date', 'bite_time', 'species', 'result
   'location', 'lat', 'lng', 'depth_ft', 'water_temp_f', 'omni', 'fight_min', 'weight_lb', 'seas', 'notes', 'deleted_at'];
 const RESULT_CLASS = { 'Released': 'good', 'Tagged & Released': 'good', 'Boated': 'blue', 'Lost': 'warn', 'Missed Bite': '' };
 const LIST_PAGE = 150;
+// What's in a photo: the billfish species plus the other fish the crew lands offshore.
+const FISH = ['Blue Marlin', 'White Marlin', 'Sailfish', 'Spearfish', 'Swordfish', 'Mahi-Mahi', 'Yellowfin Tuna',
+  'Blackfin Tuna', 'Bluefin Tuna', 'Wahoo', 'King Mackerel', 'Other'];
+const PHOTO_BUCKET = 'catch-photos';
+const PHOTO_COLS = ['id', 'boat_id', 'catch_id', 'day_id', 'path', 'thumb_path', 'width', 'height', 'fish', 'caption', 'taken_at', 'deleted_at'];
+// Fishing days (everything that isn't a billfish bite)
+const DAY_TYPES = ['Offshore trolling', 'Bottom fishing', 'Live bait / kite', 'Jigging', 'Inshore', 'Other'];
+const DAY_FISH = ['Mahi-Mahi', 'Yellowfin Tuna', 'Blackfin Tuna', 'Wahoo', 'King Mackerel', 'Amberjack', 'Grouper', 'Snapper', 'Cobia', 'Triggerfish'];
+const DAY_COLS = ['id', 'boat_id', 'day_date', 'fishing_type', 'location', 'crew', 'seas', 'water_temp_f', 'catches', 'notes', 'deleted_at'];
 
 // ------------------------------------------------------------------ local storage
 let storageWarned = false;
@@ -57,6 +66,13 @@ const K = {
   rows: b => `bl1.b.${b}.rows`,
   cursor: b => `bl1.b.${b}.cursor`,
   crew: b => `bl1.b.${b}.crew`,
+  photos: b => `bl1.b.${b}.photos`,
+  pcursor: b => `bl1.b.${b}.pcursor`,
+  days: b => `bl1.b.${b}.days`,
+  dcursor: b => `bl1.b.${b}.dcursor`,
+  photoOutbox: u => `bl1.u.${u}.photoOutbox`,
+  dayOutbox: u => `bl1.u.${u}.dayOutbox`,
+  dayDraft: u => `bl1.u.${u}.dayDraft`,
 };
 
 // ------------------------------------------------------------------ state
@@ -68,6 +84,7 @@ const S = {
   channel: null, flashId: null, form: null, pendingJoin: null, installEvt: null,
   authMode: 'in', signingInFor: null, recovery: false, signoutArmed: false,
   reauth: false, ready: false, gen: 0, authLinkErr: null,
+  photos: new Map(), photoOutbox: [], days: new Map(), dayOutbox: [], dayForm: null, pv: null, adding: 0, uploadingPhotoId: null,
 };
 
 // ------------------------------------------------------------------ small helpers
@@ -145,6 +162,8 @@ function loadUserCache(uid) {
   S.boats = LS.get(K.boats(uid), []) || [];
   S.profile = LS.get(K.profile(uid), null);
   S.outbox = (LS.get(K.outbox(uid), []) || []).filter(o => o && o.id && o.row);
+  S.photoOutbox = (LS.get(K.photoOutbox(uid), []) || []).filter(o => o && o.id && o.row);
+  S.dayOutbox = (LS.get(K.dayOutbox(uid), []) || []).filter(o => o && o.id && o.row);
   const want = LS.get(K.boatId(uid), null);
   S.boatId = S.boats.some(b => b.id === want) ? want : (S.boats[0]?.id || null);
   loadBoatCache();
@@ -153,6 +172,8 @@ function loadBoatCache() {
   S.gen++;
   S.rows = new Map(Object.entries(S.boatId ? (LS.get(K.rows(S.boatId), {}) || {}) : {}));
   S.crew = S.boatId ? (LS.get(K.crew(S.boatId), []) || []) : [];
+  S.photos = new Map(Object.entries(S.boatId ? (LS.get(K.photos(S.boatId), {}) || {}) : {}));
+  S.days = new Map(Object.entries(S.boatId ? (LS.get(K.days(S.boatId), {}) || {}) : {}));
   S.listLimit = LIST_PAGE;
 }
 const saveRows = () => { if (S.boatId) LS.set(K.rows(S.boatId), Object.fromEntries(S.rows)); };
@@ -185,7 +206,7 @@ function entries() {
 const missing = e => MUST.filter(([k]) => !s(e[k]).trim()).map(([, l]) => l);
 
 // ------------------------------------------------------------------ views
-const MAIN_VIEWS = ['log', 'summary', 'boat'];
+const MAIN_VIEWS = ['log', 'days', 'photos', 'summary', 'boat'];
 function show(v) {
   S.view = v;
   const main = MAIN_VIEWS.includes(v);
@@ -196,13 +217,15 @@ function show(v) {
   $('#tabs').hidden = !main;
   MAIN_VIEWS.forEach(x => { $('#v-' + x).hidden = v !== x; });
   $('#v-form').hidden = v !== 'form';
+  $('#v-dayform').hidden = v !== 'dayform';
+  $('#v-photo').hidden = v !== 'photo';
   $$('.tab').forEach(b => { if (b.dataset.v === v) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   render();
 }
 function route() {
   if (!S.user) return show('auth');
   if (!S.boats.length) return show('onboard');
-  if (!MAIN_VIEWS.includes(S.view) && S.view !== 'form') return show('log');
+  if (!MAIN_VIEWS.includes(S.view) && !['form', 'dayform', 'photo'].includes(S.view)) return show('log');
   show(S.view);
 }
 
@@ -213,15 +236,22 @@ function render() {
   else if (S.view === 'boat') renderBoat();
   else if (S.view === 'onboard') renderOnboard();
   else if (S.view === 'auth') renderAuth();
+  else if (S.view === 'photos') renderPhotos();
+  else if (S.view === 'days') renderDays();
+  else if (S.view === 'photo') updatePhotoMeta();
 }
 
 // ------------------------------------------------------------------ header + status
 function syncState() {
   const live = liveOutbox();
-  const n = live.length;
-  const errs = live.filter(o => o.error).length;
+  const ids = boatIds();
+  const extra = [...S.photoOutbox, ...S.dayOutbox].filter(o => ids.has(o.boat_id));
+  const n = live.length + extra.length;
+  const errs = live.filter(o => o.error).length + extra.filter(o => o.error).length;
+  const be = live.filter(o => o.error).length, pe = S.photoOutbox.filter(o => o.error && ids.has(o.boat_id)).length, de = S.dayOutbox.filter(o => o.error && ids.has(o.boat_id)).length;
+  const what = be && !pe && !de ? (be === 1 ? 'bite needs' : 'bites need') : pe && !be && !de ? (pe === 1 ? 'photo needs' : 'photos need') : de && !be && !pe ? (de === 1 ? 'fishing day needs' : 'fishing days need') : 'items need';
   const offline = navigator.onLine === false || S.authOffline || !S.sb || (!S.syncing && !!S.lastSyncErr && isNetErr(S.lastSyncErr));
-  if (errs) return ['bad', `${errs} ${errs === 1 ? 'bite needs' : 'bites need'} fixing`];
+  if (errs) return ['bad', `${errs} ${what} fixing`];
   if (offline) return [n ? 'wait' : 'bad', n ? `Offline · ${n} waiting` : 'Offline'];
   if (S.syncing) return ['wait', n ? `Uploading ${n}…` : 'Syncing…'];
   if (n) return ['wait', `${n} waiting to upload`];
@@ -233,13 +263,17 @@ function renderHeader() {
   const b = curBoat();
   $('#head-boat').textContent = b ? (b.name + (b.home_port ? ' · ' + b.home_port : '')) : '';
   $('#boat-switch').classList.toggle('static', PILOT_BOAT_ONLY);
-  $('#head-title').textContent = S.view === 'summary' ? 'Summary' : S.view === 'boat' ? 'Boat & crew' : 'Fishing Log';
+  $('#head-title').textContent = S.view === 'summary' ? 'Summary' : S.view === 'boat' ? 'Boat & crew' : S.view === 'photos' ? 'Photos' : S.view === 'days' ? 'Fishing days' : 'Billfish log';
   const [cls, text] = syncState();
   $('#status').className = 'status ' + cls; $('#status-text').textContent = text;
 
   const ban = $('#banner'); ban.replaceChildren(); let msg = null;
   const errs = liveOutbox().filter(o => o.error);
-  if (errs.length) msg = [`${errs.length === 1 ? 'A bite' : errs.length + ' bites'} couldn't upload. `, `Tap the bite marked "Couldn't upload" to see why and fix it. It's kept on this phone until then.`];
+  const bids = boatIds();
+  const perr = S.photoOutbox.filter(o => o.error && bids.has(o.boat_id)), derr = S.dayOutbox.filter(o => o.error && bids.has(o.boat_id));
+  if (errs.length) msg = [`${errs.length === 1 ? 'A bite' : errs.length + ' bites'} couldn't upload. `, `On the Billfish tab, tap the bite marked "Couldn't upload" to see why and fix it. It's kept on this phone until then.`];
+  else if (derr.length) msg = [`${derr.length === 1 ? 'A fishing day' : derr.length + ' fishing days'} couldn't upload. `, `On the Fishing tab, tap the day marked "Couldn't upload" to see why.`];
+  else if (perr.length) msg = [`${perr.length === 1 ? 'A photo' : perr.length + ' photos'} couldn't upload. `, `On the Photos tab, tap the photo marked "Couldn't upload" to see why.`];
   else if (S.authOffline && navigator.onLine !== false) msg = ['Signed out on the server. ', 'Your bites are safe on this phone. Sign in again to upload them.'];
   else if (S.lastSyncErr && navigator.onLine !== false && !S.syncing) msg = ['No signal right now. ', 'Keep logging. Bites are saved on this phone and upload when you get signal back.'];
   ban.hidden = !msg; if (msg) ban.append(h('b', { text: msg[0] }), msg[1]);
@@ -287,6 +321,8 @@ function rowEl(e) {
   if (e._error) pills.push(h('span', { class: 'pill err', text: "Couldn't upload" }));
   else if (e._pending) pills.push(h('span', { class: 'pill sync', text: 'Not uploaded yet' }));
   if (miss.length) pills.push(h('span', { class: 'pill need', text: 'Missing ' + miss.join(', ') }));
+  const np = photosFor(e.id).length;
+  if (np) pills.push(h('span', { class: 'pill blue', text: np === 1 ? '1 photo' : `${np} photos` }));
   return h('button', { type: 'button', class: 'row' + (S.flashId === e.id ? ' flash' : ''), onclick: () => openForm(e.id) },
     h('div', { class: 't' }, tm[0] || '—', h('small', { text: tm[1] || '' })),
     h('div', { class: 'main' },
@@ -566,7 +602,7 @@ async function onSignedIn(user) {
   } finally { S.signingInFor = null; }
   if (S.view === 'auth' || S.view === 'loading' || (S.view === 'onboard' && S.boats.length)) S.view = 'log';
   route();
-  restoreDraft();
+  if (!restoreDayDraft()) restoreDraft();
   stopRealtime(); subscribeRealtime();
   S.ready = true;
   syncNow();
@@ -588,7 +624,9 @@ async function signOut() {
   const uid = S.user?.id;
   if (uid) { // forget cached boat data on this device; keep any un-uploaded bites
     (LS.get(K.boats(uid), []) || []).forEach(b => { LS.del(K.rows(b.id)); LS.del(K.cursor(b.id)); LS.del(K.crew(b.id)); });
+    (LS.get(K.boats(uid), []) || []).forEach(b => { [K.photos, K.pcursor, K.days, K.dcursor].forEach(k => LS.del(k(b.id))); });
     LS.del(K.boats(uid)); LS.del(K.boatId(uid)); LS.del(K.profile(uid)); LS.del(K.draft(uid));
+    IDB.clear('thumbs').catch(() => {}); thumbUrls.forEach(u => URL.revokeObjectURL(u)); thumbUrls.clear();
   }
   let ok = false;
   try {
@@ -793,6 +831,10 @@ async function syncNow() {
     if (!S.channel) subscribeRealtime();
     await pushOutbox();
     if (S.boatId) await pullBoat(S.boatId);
+    await pushDays();
+    if (S.boatId) await pullDays(S.boatId);
+    await pushPhotos();
+    if (S.boatId) await pullPhotos(S.boatId);
     S.lastSyncAt = Date.now(); S.lastSyncErr = null;
   } catch (e) {
     S.lastSyncErr = e;
@@ -803,7 +845,7 @@ async function syncNow() {
     }
   } finally {
     S.syncing = false;
-    if (S.view !== 'form') render(); else renderHeaderIfMain();
+    if (!['form', 'dayform'].includes(S.view)) render(); else renderHeaderIfMain();
     if (S.syncAgain) { S.syncAgain = false; setTimeout(syncNow, 300); }
   }
 }
@@ -878,6 +920,24 @@ function subscribeRealtime() {
         saveRows();
         if (S.view !== 'form') render();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'catch_photos', filter: `boat_id=eq.${bid}` }, payload => {
+        if (bid !== S.boatId) return;
+        const r = payload.new && payload.new.id ? payload.new : null;
+        const id = r ? r.id : payload.old?.id;
+        if (!id || S.photoOutbox.some(o => o.id === id)) return;
+        if (!r || r.deleted_at) S.photos.delete(id); else S.photos.set(id, r);
+        savePhotos();
+        if (['photos', 'log', 'days'].includes(S.view)) render();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'fishing_days', filter: `boat_id=eq.${bid}` }, payload => {
+        if (bid !== S.boatId) return;
+        const r = payload.new && payload.new.id ? payload.new : null;
+        const id = r ? r.id : payload.old?.id;
+        if (!id || S.dayOutbox.some(o => o.id === id)) return;
+        if (!r || r.deleted_at) S.days.delete(id); else S.days.set(id, r);
+        saveDays();
+        if (S.view === 'days') render();
+      })
       .subscribe();
   } catch (e) { S.channel = null; }
 }
@@ -935,17 +995,17 @@ function readFormFields() {
 function openForm(id, draft) {
   if (!S.boatId) return;
   const all = entries();
-  if (draft) S.form = draft;
+  if (draft) S.form = { ...draft, newPhotos: [], removePhotos: [] };
   else if (id) {
     const e = all.find(x => x.id === id); if (!e) return;
     const d = {}; ROW_COLS.forEach(k => { d[k] = e[k] == null ? '' : e[k]; }); d.created_at = e.created_at;
-    S.form = { id, boat_id: e.boat_id || S.boatId, data: d, carried: false, error: e._error };
+    S.form = { id, boat_id: e.boat_id || S.boatId, data: d, carried: false, error: e._error, newPhotos: [], removePhotos: [] };
   } else {
     const t = todayISO(); const d = { catch_date: t, bite_time: nowHM() };
     const last = all.find(e => e.catch_date === t);
     let carried = false;
     if (last) CARRY.forEach(k => { if (s(last[k])) { d[k] = last[k]; carried = true; } });
-    S.form = { id: null, boat_id: S.boatId, data: d, carried: carried ? fmtTime(last.bite_time) || 'last' : false };
+    S.form = { id: null, newId: uuid(), boat_id: S.boatId, data: d, carried: carried ? fmtTime(last.bite_time) || 'last' : false, newPhotos: [], removePhotos: [] };
   }
   const f = S.form;
   $('#form-title').textContent = f.id ? 'Edit bite' : 'New bite';
@@ -954,6 +1014,8 @@ function openForm(id, draft) {
   if (f.carried) $('#carry-text').textContent = `Tide, location, water temp and seas copied from the ${f.carried} bite.`;
   $('#del-zone').hidden = !f.id; $('#del-confirm').hidden = true; $('#btn-del').hidden = false;
   fillDatalists(); setFormFields(); updateMissing();
+  renderFormPhotos('#f-photos', f, photosFor(f.id));
+  $('#btn-save').disabled = false;
   $('#discard-confirm').hidden = true;
   show('form'); window.scrollTo(0, 0);
   saveDraft();
@@ -966,19 +1028,19 @@ function updateMissing() {
 }
 let draftTimer = null;
 function formChanged() { updateMissing(); clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300); }
-function saveDraft() { if (!S.form || !S.user) return; readFormFields(); LS.set(K.draft(S.user.id), S.form); }
+function saveDraft() { if (!S.form || !S.user) return; readFormFields(); LS.set(K.draft(S.user.id), { ...S.form, newPhotos: [], removePhotos: [], staged: (S.form.newPhotos || []).length }); }
 function restoreDraft() {
   if (!S.user || S.view === 'form') return;
   const d = LS.get(K.draft(S.user.id), null);
   if (d && d.data && typeof d.data === 'object' && d.boat_id && S.boats.some(b => b.id === d.boat_id)) {
     if (d.boat_id !== S.boatId) { S.boatId = d.boat_id; saveBoats(); loadBoatCache(); }
-    openForm(null, d); toast('Picked up your unsaved bite.');
+    openForm(null, d); toast(d.staged ? 'Picked up your unsaved bite. Add its photos again.' : 'Picked up your unsaved bite.', 5000);
   }
 }
 function closeForm(force) {
   if (S.form && force !== true) {
     readFormFields();
-    if (S.form.orig && JSON.stringify(S.form.data) !== S.form.orig) { $('#discard-confirm').hidden = false; $('#discard-confirm').scrollIntoView({ block: 'nearest' }); return; }
+    if ((S.form.orig && JSON.stringify(S.form.data) !== S.form.orig) || S.form.newPhotos?.length || S.form.removePhotos?.length) { $('#discard-confirm').hidden = false; $('#discard-confirm').scrollIntoView({ block: 'nearest' }); return; }
   }
   if (S.user) LS.del(K.draft(S.user.id)); S.form = null; show('log');
 }
@@ -987,7 +1049,8 @@ function fieldError(k, msg) {
   const fld = el.closest('.fld'); fld.querySelector('.err')?.remove();
   fld.append(h('div', { class: 'err', text: msg }));
 }
-function saveForm() {
+async function saveForm() {
+  if (!S.form || S.form.saving) return;
   readFormFields();
   const f = S.form, src = f.data, row = {};
   let firstBad = null;
@@ -1008,17 +1071,21 @@ function saveForm() {
   row.lat = Number.isFinite(+src.lat) && s(src.lat) !== '' ? +src.lat : null;
   row.lng = Number.isFinite(+src.lng) && s(src.lng) !== '' ? +src.lng : null;
   row.deleted_at = null;
-  row.id = f.id || uuid();
+  row.id = f.id || f.newId || uuid();
   row.boat_id = f.boat_id || S.boatId;
   row.created_at = src.created_at || new Date().toISOString();
+  f.saving = true; $('#btn-save').disabled = true;
   if (!queueRow(row)) {
+    f.saving = false; $('#btn-save').disabled = false;
     toast("This phone is out of storage, so the bite couldn't be saved. Free up space (delete photos or apps), then tap Save again.", 9000);
     return;
   }
   S.flashId = row.id;
   if (S.user) LS.del(K.draft(S.user.id));
+  const photosOk = await commitFormPhotos(f, { catch_id: row.id, boat_id: row.boat_id, fish: row.species });
+  if (!photosOk) toast('The bite is saved, but a photo could not be stored on this phone.', 6000);
   const offline = navigator.onLine === false || !S.sb || S.authOffline || !!S.lastSyncErr;
-  toast(f.id ? (offline ? 'Changes saved on this phone. They upload when you have signal.' : 'Changes saved') : (offline ? 'Bite saved on this phone. It uploads when you have signal.' : 'Bite saved'));
+  if (photosOk) toast(f.id ? (offline ? 'Changes saved on this phone. They upload when you have signal.' : 'Changes saved') : (offline ? 'Bite saved on this phone. It uploads when you have signal.' : 'Bite saved'));
   S.form = null;
   if (row.boat_id !== S.boatId) { S.boatId = row.boat_id; saveBoats(); loadBoatCache(); }
   show('log'); window.scrollTo(0, 0);
@@ -1055,6 +1122,634 @@ function markGps() {
   }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
 }
 
+// ------------------------------------------------------------------ photo storage on the phone (IndexedDB)
+// Photos are too big for localStorage. Un-uploaded photos ('pending') and viewed thumbnails ('thumbs') live here.
+const IDB = (() => {
+  let dbp = null;
+  function open() {
+    if (!dbp) dbp = new Promise((res, rej) => {
+      if (!('indexedDB' in window)) { rej(new Error('no indexedDB')); return; }
+      const r = indexedDB.open('bl-photos', 1);
+      r.onupgradeneeded = () => { const d = r.result; d.createObjectStore('pending', { keyPath: 'id' }); d.createObjectStore('thumbs', { keyPath: 'id' }); };
+      r.onsuccess = () => {
+        const d = r.result;
+        d.onclose = () => { dbp = null; };
+        d.onversionchange = () => { d.close(); dbp = null; };
+        res(d);
+      };
+      r.onerror = () => { dbp = null; rej(r.error); };
+    });
+    return dbp;
+  }
+  async function run(store, mode, fn) {
+    const d = await open();
+    return new Promise((res, rej) => {
+      let tx;
+      try { tx = d.transaction(store, mode); } catch (e) { dbp = null; rej(e); return; } // connection was lost; reopen next time
+      const st = tx.objectStore(store);
+      let out; const r = fn(st); if (r) r.onsuccess = () => { out = r.result; };
+      tx.oncomplete = () => res(out); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+    });
+  }
+  return {
+    get: (st, k) => run(st, 'readonly', s => s.get(k)),
+    put: (st, v) => run(st, 'readwrite', s => s.put(v)),
+    del: (st, k) => run(st, 'readwrite', s => s.delete(k)),
+    keys: st => run(st, 'readonly', s => s.getAllKeys()),
+    clear: st => run(st, 'readwrite', s => s.clear()),
+  };
+})();
+const thumbUrls = new Map();   // photo id -> object URL of its thumbnail (kept for the session)
+
+// ------------------------------------------------------------------ photos: data
+const savePhotos = () => { if (S.boatId) LS.set(K.photos(S.boatId), Object.fromEntries(S.photos)); };
+const savePhotoOutbox = () => (S.user ? LS.set(K.photoOutbox(S.user.id), S.photoOutbox) : true);
+function photosList() {
+  const m = new Map(S.photos);
+  const pend = new Map();
+  for (const o of S.photoOutbox) if (o.boat_id === S.boatId) { m.set(o.id, o.row); pend.set(o.id, o); }
+  const out = [];
+  for (const [id, r] of m) {
+    if (!r || r.deleted_at) continue;
+    const o = pend.get(id);
+    out.push(Object.assign({}, r, { id, _pending: !!o, _error: o ? o.error : null }));
+  }
+  out.sort((a, b) => s(b.taken_at || b.created_at).localeCompare(s(a.taken_at || a.created_at)));
+  return out;
+}
+const photosFor = catchId => (catchId ? photosList().filter(p => p.catch_id === catchId) : []);
+const photosForDay = dayId => (dayId ? photosList().filter(p => p.day_id === dayId) : []);
+
+// Shrink a picked photo to a 1600px JPEG (fast to upload on weak signal) plus a 420px thumbnail.
+// When a photo was really taken (EXIF DateTimeOriginal), so library photos land on the right day.
+async function exifDate(file) {
+  try {
+    const buf = new DataView(await file.slice(0, 131072).arrayBuffer());
+    if (buf.getUint16(0) !== 0xFFD8) return null;
+    let off = 2;
+    while (off + 4 < buf.byteLength) {
+      const marker = buf.getUint16(off), len = buf.getUint16(off + 2);
+      if (marker === 0xFFE1 && buf.getUint32(off + 4) === 0x45786966) { // "Exif"
+        const tiff = off + 10, le = buf.getUint16(tiff) === 0x4949;
+        const u16 = o => buf.getUint16(o, le), u32 = o => buf.getUint32(o, le);
+        const findTag = (ifd, tag) => { const n = u16(ifd); for (let i = 0; i < n; i++) { const e = ifd + 2 + i * 12; if (u16(e) === tag) return e; } return 0; };
+        const ifd0 = tiff + u32(tiff + 4);
+        const exifPtr = findTag(ifd0, 0x8769); if (!exifPtr) return null;
+        const exif = tiff + u32(exifPtr + 8);
+        const dt = findTag(exif, 0x9003) || findTag(exif, 0x9004); if (!dt) return null;
+        const at = tiff + u32(dt + 8); let str = '';
+        for (let i = 0; i < 19; i++) str += String.fromCharCode(buf.getUint8(at + i));
+        const m = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(str);
+        if (!m) return null;
+        const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]); // camera local time
+        return isNaN(d) || d.getFullYear() < 1990 ? null : d.toISOString();
+      }
+      if ((marker & 0xFF00) !== 0xFF00) return null;
+      off += 2 + len;
+    }
+  } catch (e) {}
+  return null;
+}
+async function processImage(file) {
+  const takenAt = await exifDate(file);
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image(); img.decoding = 'async'; img.src = url;
+    await img.decode();
+    const W = img.naturalWidth, H = img.naturalHeight;
+    if (!W || !H) throw new Error('empty image');
+    const draw = (max, quality) => new Promise((res, rej) => {
+      const k = Math.min(1, max / Math.max(W, H)); const w = Math.max(1, Math.round(W * k)), hh = Math.max(1, Math.round(H * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = hh;
+      c.getContext('2d').drawImage(img, 0, 0, w, hh);
+      c.toBlob(b => { c.width = 0; c.height = 0; (b ? res({ blob: b, w, h: hh }) : rej(new Error('encode failed'))); }, 'image/jpeg', quality); // free canvas memory (iPhone limit)
+    });
+    const full = await draw(1600, 0.82); const thumb = await draw(420, 0.72);
+    return { id: uuid(), full: full.blob, thumb: thumb.blob, width: full.w, height: full.h,
+      taken_at: takenAt || new Date(file.lastModified || Date.now()).toISOString() };
+  } finally { URL.revokeObjectURL(url); }
+}
+function showAdding() {
+  ['#btn-add-photos', '#btn-f-photo', '#btn-d-photo'].forEach(sel => { $(sel).disabled = S.adding > 0; });
+  $$('.adding-note').forEach(el => el.remove());
+  if (S.adding > 0) {
+    const txt = `Adding ${S.adding} ${S.adding === 1 ? 'photo' : 'photos'}…`;
+    ['#f-photos', '#d-photos'].forEach(sel => $(sel).after(h('p', { class: 'note adding-note', style: 'margin:0 0 8px', text: txt })));
+  }
+  if (S.view === 'photos') renderPhotos();
+}
+async function stageFiles(files) {
+  const out = [];
+  S.adding += files.length; showAdding();
+  for (const f of files) {
+    try { const st = await processImage(f); thumbUrls.set(st.id, URL.createObjectURL(st.thumb)); out.push(st); }
+    catch (e) {
+      toast(/hei[cf]/i.test(f.type) || /\.hei[cf]$/i.test(f.name)
+        ? "That's an iPhone HEIC photo this browser can't open. Add it from the phone (Safari) instead."
+        : "One photo couldn't be read. Try a different photo.", 6000);
+    }
+    finally { S.adding--; showAdding(); }
+  }
+  return out;
+}
+// Put a processed photo in the upload queue. Returns false if the phone can't store it.
+async function queuePhoto(st, link) {
+  const bid = link.boat_id || S.boatId;
+  try { await IDB.put('pending', { id: st.id, full: st.full, thumb: st.thumb }); }
+  catch (e) { toast("This phone couldn't save the photo (storage full or private browsing).", 7000); return false; }
+  const row = {
+    id: st.id, boat_id: bid, catch_id: link.catch_id || null, day_id: link.day_id || null,
+    path: `${bid}/${st.id}.jpg`, thumb_path: `${bid}/${st.id}_t.jpg`, width: st.width, height: st.height,
+    fish: link.fish || null, caption: link.caption || null, taken_at: st.taken_at, deleted_at: null, created_at: new Date().toISOString(),
+  };
+  const entry = { id: st.id, boat_id: bid, row, needsUpload: true, error: null };
+  const at = S.photoOutbox.findIndex(o => o.id === st.id);
+  if (at >= 0) S.photoOutbox[at] = entry; else S.photoOutbox.push(entry);
+  savePhotoOutbox();
+  return true;
+}
+// Change a photo's details (or delete it): queue an updated row.
+function queuePhotoEdit(p, changes) {
+  const i = S.photoOutbox.findIndex(o => o.id === p.id);
+  const base = i >= 0 ? S.photoOutbox[i].row : Object.fromEntries(PHOTO_COLS.map(k => [k, p[k] === undefined ? null : p[k]]));
+  const row = { ...base, ...changes };
+  if (i >= 0) S.photoOutbox[i] = { ...S.photoOutbox[i], row, error: null, rejected: false };
+  else S.photoOutbox.push({ id: p.id, boat_id: p.boat_id, row, needsUpload: false, error: null });
+  savePhotoOutbox();
+}
+
+// ------------------------------------------------------------------ photos & days: sync
+function isTransient(error, status) {
+  return isNetErr(error) || !error.code || status === 0 || status === 401 || status === 408 || status === 429 || status >= 500 || /jwt|expired/i.test(s(error.message));
+}
+async function uploadObject(path, blob) {
+  const { error } = await S.sb.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+  if (!error) return;
+  const m = s(error.message), code = s(error.statusCode || error.status);
+  if (/already exists|duplicate/i.test(m) || code === '409') return; // uploaded on an earlier try
+  if (isNetErr(error) || !code || +code >= 500 || code === '429' || code === '401' || code === '408') throw Object.assign(new Error(m || 'upload failed'), { transient: true });
+  throw Object.assign(new Error(m || 'upload refused'), { transient: false });
+}
+async function pushPhotos() {
+  const ids = boatIds();
+  for (const item of S.photoOutbox.slice()) {
+    if (item.rejected || (!ids.has(item.boat_id) && S.boats.length)) continue;
+    try {
+      if (item.needsUpload) {
+        let blobs;
+        try { blobs = await IDB.get('pending', item.id); }
+        catch (e) { throw Object.assign(e || new Error('storage'), { transient: true }); } // phone storage hiccup: try again later
+        if (!blobs) { item.error = "The photo file was lost on this phone. Delete it and add it again."; item.rejected = true; savePhotoOutbox(); continue; }
+        S.uploadingPhotoId = item.id;
+        try {
+          await uploadObject(item.row.thumb_path, blobs.thumb);
+          await uploadObject(item.row.path, blobs.full);
+        } finally { S.uploadingPhotoId = null; }
+        item.needsUpload = false; savePhotoOutbox();
+      }
+    } catch (e) {
+      if (e.transient !== false) throw e;
+      item.error = friendly(e); item.rejected = true; savePhotoOutbox(); continue;
+    }
+    const payload = {}; PHOTO_COLS.forEach(k => { payload[k] = item.row[k] === undefined ? null : item.row[k]; });
+    const { error, status } = await q(S.sb.from('catch_photos').upsert(payload, { onConflict: 'id' }));
+    if (error) {
+      if (isTransient(error, status)) throw error;
+      item.error = friendly(error); item.rejected = true; savePhotoOutbox(); continue;
+    }
+    const i = S.photoOutbox.indexOf(item);
+    if (i < 0 && !S.photoOutbox.some(o => o.id === item.id) && !item.row.deleted_at) {
+      // Deleted on this phone while it was uploading: mark it deleted on the server too.
+      await q(S.sb.from('catch_photos').upsert({ ...payload, deleted_at: new Date().toISOString() }, { onConflict: 'id' }));
+      IDB.del('pending', item.id).catch(() => {});
+      continue;
+    }
+    if (i >= 0) {
+      S.photoOutbox.splice(i, 1); savePhotoOutbox();
+      const blobs = await IDB.get('pending', item.id).catch(() => null);
+      if (blobs) { IDB.put('thumbs', { id: item.id, blob: blobs.thumb, at: Date.now() }).catch(() => {}); IDB.del('pending', item.id).catch(() => {}); }
+      if (item.boat_id === S.boatId) { if (item.row.deleted_at) S.photos.delete(item.id); else S.photos.set(item.id, { ...item.row }); savePhotos(); }
+    }
+  }
+}
+const saveDays = () => { if (S.boatId) LS.set(K.days(S.boatId), Object.fromEntries(S.days)); };
+const saveDayOutbox = () => (S.user ? LS.set(K.dayOutbox(S.user.id), S.dayOutbox) : true);
+async function pushDays() {
+  const ids = boatIds();
+  for (const item of S.dayOutbox.slice()) {
+    if (item.rejected || (!ids.has(item.boat_id) && S.boats.length)) continue;
+    const payload = {}; DAY_COLS.forEach(k => { payload[k] = item.row[k] === undefined ? null : item.row[k]; });
+    const { error, status } = await q(S.sb.from('fishing_days').upsert(payload, { onConflict: 'id' }));
+    if (error) {
+      if (isTransient(error, status)) throw error;
+      item.error = friendly(error); item.rejected = true; saveDayOutbox(); continue;
+    }
+    const i = S.dayOutbox.indexOf(item);
+    if (i >= 0) {
+      S.dayOutbox.splice(i, 1); saveDayOutbox();
+      if (item.boat_id === S.boatId) { if (item.row.deleted_at) S.days.delete(item.id); else S.days.set(item.id, { ...item.row }); saveDays(); }
+    }
+  }
+}
+// Download changes since the last sync for photos or days (same scheme as bites: server cursor + 5 min overlap).
+async function pullTable(bid, table, rowsKey, cursorKey, pendingIds, getMap) {
+  const cursor = LS.get(cursorKey(bid), null);
+  const since = cursor ? new Date(parseTs(cursor) - 5 * 60 * 1000).toISOString() : null;
+  const gen = S.gen, cur = bid === S.boatId;
+  const rows = cur ? getMap() : new Map(Object.entries(LS.get(rowsKey(bid), {}) || {}));
+  const PAGE = 250; let maxTs = cursor, from = 0;
+  for (let page = 0; page < 400; page++) {
+    let qb = S.sb.from(table).select('*').eq('boat_id', bid).order('updated_at', { ascending: true }).order('id', { ascending: true }).range(from, from + PAGE - 1);
+    qb = since ? qb.gte('updated_at', since) : qb.is('deleted_at', null);
+    const { data, error } = await q(qb, 30000);
+    if (error) throw error;
+    if (cur && gen !== S.gen) { S.syncAgain = true; return; }
+    for (const r of data) {
+      if (!maxTs || parseTs(r.updated_at) > parseTs(maxTs)) maxTs = r.updated_at;
+      if (pendingIds.has(r.id)) continue;
+      if (r.deleted_at) rows.delete(r.id); else rows.set(r.id, r);
+    }
+    if (LS.set(rowsKey(bid), Object.fromEntries(rows))) { if (maxTs) LS.set(cursorKey(bid), maxTs); } else LS.del(cursorKey(bid));
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+}
+const pullPhotos = bid => pullTable(bid, 'catch_photos', K.photos, K.pcursor, new Set(S.photoOutbox.map(o => o.id)), () => S.photos);
+const pullDays = bid => pullTable(bid, 'fishing_days', K.days, K.dcursor, new Set(S.dayOutbox.map(o => o.id)), () => S.days);
+
+// ------------------------------------------------------------------ photos: showing them
+const thumbQueue = []; let thumbWorkers = 0;
+function loadThumb(img, p) {
+  if (thumbUrls.has(p.id)) { img.src = thumbUrls.get(p.id); return; }
+  thumbQueue.push([img, p]); pumpThumbs();
+}
+function pumpThumbs() {
+  while (thumbWorkers < 4 && thumbQueue.length) {
+    const [img, p] = thumbQueue.shift(); thumbWorkers++;
+    thumbBlobUrl(p).then(u => { if (u && img.isConnected) img.src = u; }).catch(() => {}).finally(() => { thumbWorkers--; pumpThumbs(); });
+  }
+}
+async function thumbBlobUrl(p) {
+  if (thumbUrls.has(p.id)) return thumbUrls.get(p.id);
+  let blob = (await IDB.get('pending', p.id).catch(() => null))?.thumb || (await IDB.get('thumbs', p.id).catch(() => null))?.blob;
+  if (!blob && S.sb && navigator.onLine !== false && p.thumb_path) {
+    const { data, error } = await S.sb.storage.from(PHOTO_BUCKET).download(p.thumb_path);
+    if (!error && data) { blob = data; IDB.put('thumbs', { id: p.id, blob, at: Date.now() }).catch(() => {}); }
+  }
+  if (!blob) return null;
+  const u = URL.createObjectURL(blob); thumbUrls.set(p.id, u); return u;
+}
+async function fullBlob(p) {
+  const pend = await IDB.get('pending', p.id).catch(() => null);
+  if (pend?.full) return pend.full;
+  if (!S.sb || navigator.onLine === false) return null;
+  const { data, error } = await S.sb.storage.from(PHOTO_BUCKET).download(p.path);
+  return error ? null : data;
+}
+function photoTile(p, onclick) {
+  const img = h('img', { alt: p.fish ? p.fish : 'Fishing photo', loading: 'lazy' });
+  loadThumb(img, p);
+  return h('button', { type: 'button', class: 'ptile', onclick },
+    img,
+    p.fish ? h('span', { class: 'tag', text: p.fish }) : null,
+    p._error ? h('span', { class: 'up err', text: "Couldn't upload" }) : p._pending ? h('span', { class: 'up', text: 'Not uploaded' }) : null);
+}
+function renderPhotos() {
+  const all = photosList();
+  const area = $('#photo-area'); area.replaceChildren();
+  if (S.adding) area.append(h('p', { class: 'note', text: `Adding ${S.adding} ${S.adding === 1 ? 'photo' : 'photos'}…` }));
+  if (!all.length) {
+    area.append(h('div', { class: 'empty', style: 'margin-top:12px' }, h('b', { text: 'No photos yet' }), 'Tap Add photos to put the first fish of the season in here.'));
+    return;
+  }
+  let cur = null, grid = null;
+  all.forEach((p, i) => {
+    const d = s(p.taken_at || p.created_at).slice(0, 10);
+    const localDay = d ? isoDate(new Date(p.taken_at || p.created_at)) : '';
+    if (localDay !== cur) {
+      cur = localDay;
+      area.append(h('div', { class: 'section-title', text: localDay ? fmtDate(localDay) : 'Undated' }));
+      grid = h('div', { class: 'pgrid' }); area.append(grid);
+    }
+    grid.append(photoTile(p, () => openPhoto(all.map(x => x.id), i)));
+  });
+}
+async function addPhotosFromGallery(files) {
+  if (!files.length) return;
+  const staged = await stageFiles(files);
+  const added = [];
+  for (const st of staged) if (await queuePhoto(st, {})) added.push(st.id);
+  render(); syncNow();
+  if (added.length) {
+    toast(added.length === 1 ? 'Photo added. Tap it to say what fish it is.' : `${added.length} photos added. Tap one to say what fish it is.`, 4500);
+  }
+}
+
+// ------------------------------------------------------------------ one photo (viewer)
+function openPhoto(ids, i) {
+  S.pv = { ids, i, changed: false };
+  show('photo'); window.scrollTo(0, 0);
+  renderPhotoViewer();
+}
+function photoFishOptions() {
+  const fromDays = daysList().flatMap(d => Object.keys(d.catches || {}));
+  return [...new Set([...FISH.filter(f => f !== 'Other'), ...DAY_FISH, ...fromDays, 'Other'])];
+}
+function currentPhoto() { if (!S.pv) return null; const id = S.pv.ids[S.pv.i]; return photosList().find(p => p.id === id) || null; }
+function renderPhotoViewer() {
+  const p = currentPhoto();
+  if (!p) { S.pv = null; show('photos'); return; }
+  $('#pv-title').textContent = p.fish || 'Photo';
+  $('#pv-count').textContent = S.pv.ids.length > 1 ? `${S.pv.i + 1} of ${S.pv.ids.length}` : '';
+  $('#pv-prev').disabled = S.pv.i <= 0; $('#pv-next').disabled = S.pv.i >= S.pv.ids.length - 1;
+  const img = $('#pv-img'); img.alt = p.fish || 'Fishing photo'; img.removeAttribute('src');
+  const id = p.id;
+  thumbBlobUrl(p).then(u => { if (u && currentPhoto()?.id === id && !img.dataset.full) img.src = u; });
+  delete img.dataset.full;
+  S.pv.full = null;
+  fullBlob(p).then(b => { if (b && currentPhoto()?.id === id) { S.pv.full = { id, blob: b }; const u = URL.createObjectURL(b); img.onload = () => URL.revokeObjectURL(u); img.dataset.full = '1'; img.src = u; } });
+  updatePhotoMeta(p);
+  const bite = p.catch_id ? entries().find(e => e.id === p.catch_id) : null;
+  const day = p.day_id ? daysList().find(d => d.id === p.day_id) : null;
+  const link = $('#pv-bite');
+  link.hidden = !bite && !day;
+  const keepEdits = () => { if (S.pv && (S.pv.changed || $('#pv-caption').value.trim() !== s(currentPhoto()?.caption))) savePhotoDetails(true); };
+  if (bite) { link.textContent = `From the ${fmtTime(bite.bite_time) || ''} ${s(bite.species) || 'billfish'} bite on ${fmtDate(bite.catch_date, true)}`.replace(/\s+/g, ' '); link.onclick = () => { keepEdits(); openForm(bite.id); }; }
+  else if (day) { link.textContent = `From the ${fmtDate(day.day_date, true)} fishing day`; link.onclick = () => { keepEdits(); openDayForm(day.id); }; }
+  // fish chips + caption
+  const box = $('#pv-fish'); box.replaceChildren();
+  const opts = photoFishOptions(); if (p.fish && !opts.includes(p.fish)) opts.splice(opts.length - 1, 0, p.fish);
+  S.pv.fish = p.fish || ''; S.pv.changed = false;
+  const mark = () => $$('#pv-fish .chip[data-v]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === S.pv.fish)));
+  opts.forEach(f => box.append(h('button', { type: 'button', class: 'chip', 'data-v': f, 'aria-pressed': String(S.pv.fish === f), text: f, onclick: () => {
+    S.pv.fish = S.pv.fish === f ? '' : f; S.pv.changed = true; $('#pv-other').value = ''; mark();
+  } })));
+  $('#pv-other').value = '';
+  $('#pv-caption').value = s(p.caption);
+  $('#pv-del-confirm').hidden = true; $('#pv-del').hidden = false;
+}
+function updatePhotoMeta(p) {
+  p = p || currentPhoto(); if (!p) return;
+  const who = S.crew.find(c => c.user_id === p.created_by)?.name;
+  const when = p.taken_at ? `${fmtDate(isoDate(new Date(p.taken_at)), true)} · ${new Date(p.taken_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+  $('#pv-meta').textContent = [when, who ? `Added by ${who}` : '', p._error ? `Couldn't upload: ${p._error}` : p._pending ? 'Not uploaded yet' : ''].filter(Boolean).join(' · ');
+}
+function savePhotoDetails(quiet) {
+  const p = currentPhoto(); if (!p) return;
+  const caption = $('#pv-caption').value.trim().slice(0, 300) || null;
+  const fish = S.pv.fish || null;
+  if (s(fish) === s(p.fish) && s(caption) === s(p.caption)) { if (!quiet) toast('Nothing to save.'); return; }
+  queuePhotoEdit(p, { fish, caption });
+  S.pv.changed = false;
+  if (!quiet) toast('Saved');
+  renderPhotoViewer(); syncNow();
+}
+function stepPhoto(d) {
+  if (!S.pv) return;
+  if (S.pv.changed || $('#pv-caption').value.trim() !== s(currentPhoto()?.caption)) savePhotoDetails(true);
+  S.pv.i = Math.max(0, Math.min(S.pv.ids.length - 1, S.pv.i + d)); renderPhotoViewer(); window.scrollTo(0, 0);
+}
+function closePhoto() {
+  if (S.pv && (S.pv.changed || $('#pv-caption').value.trim() !== s(currentPhoto()?.caption))) savePhotoDetails(true);
+  S.pv = null; show('photos');
+}
+function deletePhoto() {
+  const p = currentPhoto(); if (!p) return;
+  const pend = S.photoOutbox.find(o => o.id === p.id);
+  if (pend && pend.needsUpload && S.uploadingPhotoId !== p.id) { // never left the phone: just drop it
+    S.photoOutbox = S.photoOutbox.filter(o => o.id !== p.id); savePhotoOutbox(); IDB.del('pending', p.id).catch(() => {});
+  } else queuePhotoEdit(p, { deleted_at: new Date().toISOString() });
+  S.pv.ids.splice(S.pv.i, 1); if (S.pv.i >= S.pv.ids.length) S.pv.i = S.pv.ids.length - 1;
+  toast('Photo deleted'); syncNow();
+  if (!S.pv.ids.length) { S.pv = null; show('photos'); } else renderPhotoViewer();
+}
+async function sharePhoto() {
+  const p = currentPhoto(); if (!p) return;
+  const b = S.pv?.full?.id === p.id ? S.pv.full.blob : null;
+  if (!b) { toast(navigator.onLine === false ? 'The full photo needs signal to load first.' : 'Still loading the full photo. Tap again in a moment.'); return; }
+  const name = `${(p.fish || 'fish').replace(/[^\w-]+/g, '-').toLowerCase()}-${s(p.taken_at).slice(0, 10) || todayISO()}.jpg`;
+  const file = new File([b], name, { type: 'image/jpeg' });
+  try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: p.fish || 'Fishing photo' }); return; } }
+  catch (e) { if (e && e.name === 'AbortError') return; }
+  const u = URL.createObjectURL(b); const a = h('a', { href: u, download: name }); document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 10000);
+}
+
+// ------------------------------------------------------------------ photos inside the bite / day forms
+// New photos are held in the form until Save, so Cancel throws them away cleanly.
+function renderFormPhotos(boxSel, form, existing) {
+  const box = $(boxSel); box.replaceChildren();
+  existing.filter(p => !form.removePhotos.includes(p.id)).forEach(p => {
+    const img = h('img', { alt: p.fish || 'Photo' }); loadThumb(img, p);
+    box.append(h('div', { class: 'fthumb' }, img, h('button', { type: 'button', 'aria-label': 'Remove photo', text: '×', onclick: () => { form.removePhotos.push(p.id); renderFormPhotos(boxSel, form, existing); } })));
+  });
+  form.newPhotos.forEach(st => {
+    const img = h('img', { alt: 'New photo', src: thumbUrls.get(st.id) || '' });
+    box.append(h('div', { class: 'fthumb' }, img, h('button', { type: 'button', 'aria-label': 'Remove photo', text: '×', onclick: () => { form.newPhotos = form.newPhotos.filter(x => x !== st); renderFormPhotos(boxSel, form, existing); } })));
+  });
+}
+async function commitFormPhotos(form, link) {
+  for (const id of form.removePhotos) {
+    const p = photosList().find(x => x.id === id); if (!p) continue;
+    const pend = S.photoOutbox.find(o => o.id === id);
+    if (pend && pend.needsUpload && S.uploadingPhotoId !== id) { S.photoOutbox = S.photoOutbox.filter(o => o.id !== id); savePhotoOutbox(); IDB.del('pending', id).catch(() => {}); }
+    else queuePhotoEdit(p, { deleted_at: new Date().toISOString() });
+  }
+  let ok = true;
+  for (const st of form.newPhotos) ok = (await queuePhoto(st, link)) && ok;
+  return ok;
+}
+
+// ------------------------------------------------------------------ fishing days: data
+function daysList() {
+  const m = new Map(S.days); const pend = new Map();
+  for (const o of S.dayOutbox) if (o.boat_id === S.boatId) { m.set(o.id, o.row); pend.set(o.id, o); }
+  const out = [];
+  for (const [id, r] of m) {
+    if (!r || r.deleted_at) continue;
+    const o = pend.get(id);
+    out.push(Object.assign({}, r, { id, _pending: !!o, _error: o ? o.error : null }));
+  }
+  out.sort((a, b) => s(b.day_date).localeCompare(s(a.day_date)) || s(b.created_at).localeCompare(s(a.created_at)));
+  return out;
+}
+const tallyOf = d => Object.entries(d.catches && typeof d.catches === 'object' ? d.catches : {}).filter(([, n]) => +n > 0).sort((a, b) => b[1] - a[1]);
+const tallyText = d => tallyOf(d).map(([f, n]) => `${f} ${n}`).join(' · ');
+
+function renderDays() {
+  const all = daysList();
+  const yr = String(new Date().getFullYear());
+  const season = all.filter(d => s(d.day_date).startsWith(yr));
+  const totals = new Map(); season.forEach(d => tallyOf(d).forEach(([f, n]) => totals.set(f, (totals.get(f) || 0) + (+n))));
+  const top = [...totals].sort((a, b) => b[1] - a[1]);
+  $('#d-season').textContent = season.length
+    ? `${season.length} ${season.length === 1 ? 'day' : 'days'} this season` + (top.length ? ` · ${top.slice(0, 4).map(([f, n]) => `${f} ${n}`).join(' · ')}` : '')
+    : 'No fishing days logged this season yet.';
+  const area = $('#days-area'); area.replaceChildren();
+  if (!all.length) {
+    area.append(h('div', { class: 'empty', style: 'margin-top:12px' }, h('b', { text: 'No fishing days yet' }),
+      'Tap Log a fishing day after a day of mahi, tuna, wahoo or bottom fishing.'));
+    return;
+  }
+  const list = h('div', { class: 'list', style: 'margin-top:12px' }); area.append(list);
+  all.forEach(d => {
+    const pills = [];
+    const np = photosForDay(d.id).length;
+    if (np) pills.push(h('span', { class: 'pill blue', text: np === 1 ? '1 photo' : `${np} photos` }));
+    if (d._error) pills.push(h('span', { class: 'pill err', text: "Couldn't upload" }));
+    else if (d._pending) pills.push(h('span', { class: 'pill sync', text: 'Not uploaded yet' }));
+    const sub = [d.fishing_type, d.location, (d.crew || []).join(', ')].map(s).filter(Boolean).join(' · ');
+    const dt = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s(d.day_date));
+    const day = dt ? new Date(+dt[1], +dt[2] - 1, +dt[3]) : null;
+    list.append(h('button', { type: 'button', class: 'row', onclick: () => openDayForm(d.id) },
+      h('div', { class: 't' }, day ? day.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—', h('small', { text: day ? day.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase() : '' })),
+      h('div', { class: 'main' },
+        h('div', { class: 'sp', text: tallyText(d) || 'No fish tallied' }),
+        sub ? h('div', { class: 'det', text: sub }) : null,
+        pills.length ? h('div', { class: 'pills' }, pills) : null)));
+  });
+}
+
+// ------------------------------------------------------------------ fishing day form
+function openDayForm(id) {
+  if (!S.boatId) return;
+  const all = daysList();
+  if (id) {
+    const d = all.find(x => x.id === id); if (!d) return;
+    S.dayForm = { id, boat_id: d.boat_id || S.boatId, data: { ...d, crew: [...(d.crew || [])], catches: { ...(d.catches || {}) } }, error: d._error, newPhotos: [], removePhotos: [] };
+  } else {
+    S.dayForm = { id: null, newId: uuid(), boat_id: S.boatId, data: { day_date: todayISO(), crew: [], catches: {} }, newPhotos: [], removePhotos: [] };
+  }
+  return showDayForm();
+}
+function showDayForm() {
+  const f = S.dayForm, all = daysList();
+  $('#day-title').textContent = f.id ? 'Edit fishing day' : 'New fishing day';
+  $('#day-save').textContent = f.id ? 'Save changes' : 'Save day';
+  $('#day-del-zone').hidden = !f.id; $('#day-del-confirm').hidden = true; $('#day-del').hidden = false;
+  $('#day-discard').hidden = true;
+  $('#d-date').value = s(f.data.day_date); $('#d-location').value = s(f.data.location);
+  $('#d-temp').value = s(f.data.water_temp_f); $('#d-notes').value = s(f.data.notes);
+  $('#d-crew-other').value = ''; $('#d-addfish').value = '';
+  $('#day-save').disabled = false;
+  $('#day-note').textContent = f.error ? `Couldn't upload: ${f.error} Fix it and save again.` : '';
+  renderDayChips(); renderTally(); renderFormPhotos('#d-photos', f, photosForDay(f.id));
+  const locs = [...new Set([...entries().map(e => s(e.location).trim()), ...all.map(d => s(d.location).trim())].filter(Boolean))].slice(0, 60);
+  $('#dl-loc').replaceChildren(...locs.map(v => h('option', { value: v })));
+  readDayForm(); if (!f.orig) f.orig = JSON.stringify(f.data);
+  show('dayform'); window.scrollTo(0, 0);
+}
+let dayDraftTimer = null;
+function dayDraftSoon() {
+  clearTimeout(dayDraftTimer);
+  dayDraftTimer = setTimeout(() => { if (S.dayForm && S.user) { readDayForm(); LS.set(K.dayDraft(S.user.id), { ...S.dayForm, newPhotos: [], removePhotos: [], staged: S.dayForm.newPhotos.length }); } }, 300);
+}
+function restoreDayDraft() {
+  if (!S.user || ['form', 'dayform'].includes(S.view)) return false;
+  const d = LS.get(K.dayDraft(S.user.id), null);
+  if (!d || !d.data || !d.boat_id || !S.boats.some(b => b.id === d.boat_id)) return false;
+  if (d.boat_id !== S.boatId) { S.boatId = d.boat_id; saveBoats(); loadBoatCache(); }
+  S.dayForm = { ...d, newPhotos: [], removePhotos: [] };
+  showDayForm();
+  toast(d.staged ? 'Picked up your unsaved fishing day. Add its photos again.' : 'Picked up your unsaved fishing day.', 5000);
+  return true;
+}
+const clearDayDraft = () => { clearTimeout(dayDraftTimer); if (S.user) LS.del(K.dayDraft(S.user.id)); };
+function renderDayChips() {
+  const d = S.dayForm.data;
+  const single = (sel, field, opts) => {
+    const box = $(sel); box.replaceChildren();
+    const list = opts.slice(); if (d[field] && !list.includes(d[field])) list.push(d[field]);
+    list.forEach(o => box.append(h('button', { type: 'button', class: 'chip', 'aria-pressed': String(d[field] === o), text: o, onclick: () => { d[field] = d[field] === o ? '' : o; renderDayChips(); dayDraftSoon(); } })));
+  };
+  single('#d-type', 'fishing_type', DAY_TYPES);
+  single('#d-seas', 'seas', LISTS.seas);
+  const crewBox = $('#d-crew'); crewBox.replaceChildren();
+  const names = [...new Set([...anglerOptions().filter(n => n !== 'Guest'), ...d.crew])];
+  names.forEach(n => crewBox.append(h('button', { type: 'button', class: 'chip', 'aria-pressed': String(d.crew.includes(n)), text: n, onclick: () => {
+    d.crew = d.crew.includes(n) ? d.crew.filter(x => x !== n) : [...d.crew, n]; renderDayChips(); dayDraftSoon();
+  } })));
+}
+function renderTally() {
+  const d = S.dayForm.data; const box = $('#d-tally'); box.replaceChildren();
+  const others = daysList().flatMap(x => Object.keys(x.catches || {}));
+  const fish = [...new Set([...DAY_FISH, ...others, ...Object.keys(d.catches)])];
+  fish.forEach(f => {
+    const n = +d.catches[f] || 0;
+    const set = v => { const x = Math.max(0, Math.min(999, v)); if (x) d.catches[f] = x; else delete d.catches[f]; renderTally(); dayDraftSoon(); };
+    box.append(h('div', { class: 'trow' + (n ? ' on' : '') },
+      h('span', { class: 'tname', text: f }),
+      h('button', { type: 'button', class: 'tbtn', 'aria-label': `One less ${f}`, text: '−', disabled: !n, onclick: () => set(n - 1) }),
+      h('span', { class: 'tnum', text: String(n), 'aria-live': 'polite' }),
+      h('button', { type: 'button', class: 'tbtn', 'aria-label': `One more ${f}`, text: '+', onclick: () => set(n + 1) })));
+  });
+}
+function readDayForm() {
+  const d = S.dayForm.data;
+  d.day_date = $('#d-date').value; d.location = $('#d-location').value; d.water_temp_f = $('#d-temp').value; d.notes = $('#d-notes').value;
+}
+function dayFormChanged() {
+  readDayForm();
+  return JSON.stringify(S.dayForm.data) !== S.dayForm.orig || S.dayForm.newPhotos.length || S.dayForm.removePhotos.length
+    || !!$('#d-addfish').value.trim() || !!$('#d-crew-other').value.trim();
+}
+function closeDayForm(force) {
+  if (S.dayForm && force !== true && dayFormChanged()) { $('#day-discard').hidden = false; $('#day-discard').scrollIntoView({ block: 'nearest' }); return; }
+  clearDayDraft(); S.dayForm = null; show('days');
+}
+// Match a typed fish name to one already used ("mahi-mahi" -> "Mahi-Mahi") so tallies add up.
+function canonicalFish(name, existing) {
+  const v = s(name).trim().slice(0, 60); if (!v) return '';
+  const all = [...DAY_FISH, ...FISH, ...existing, ...daysList().flatMap(x => Object.keys(x.catches || {}))];
+  return all.find(x => x.toLowerCase() === v.toLowerCase()) || v;
+}
+async function saveDayForm() {
+  const f = S.dayForm; if (!f || f.saving) return;
+  readDayForm();
+  const d = f.data;
+  const typed = canonicalFish($('#d-addfish').value, Object.keys(d.catches));
+  if (typed) { d.catches[typed] = (+d.catches[typed] || 0) + 1; $('#d-addfish').value = ''; renderTally(); }
+  const other = $('#d-crew-other').value.trim();
+  if (other && !d.crew.includes(other)) d.crew.push(other.slice(0, 60));
+  let temp = null;
+  const raw0 = s(d.water_temp_f).trim();
+  if (raw0) {
+    const n = Number(/^\d*,\d{1,2}$/.test(raw0) ? raw0.replace(',', '.') : raw0.replace(/,/g, ''));
+    if (!Number.isFinite(n) || n < 20 || n > 120) { $('#d-temp').focus(); toast('Water temp should be a number between 20 and 120.'); return; }
+    temp = n;
+  }
+  const id = f.id || f.newId || uuid();
+  f.saving = true; $('#day-save').disabled = true;
+  const catches = {}; Object.entries(d.catches).forEach(([k, v]) => { if (+v > 0) catches[s(k).slice(0, 60)] = Math.min(999, Math.round(+v)); });
+  const row = {
+    id, boat_id: f.boat_id || S.boatId,
+    day_date: /^\d{4}-\d{2}-\d{2}$/.test(s(d.day_date)) ? d.day_date : todayISO(),
+    fishing_type: s(d.fishing_type).trim().slice(0, 60) || null, location: s(d.location).trim().slice(0, 120) || null,
+    crew: d.crew.map(x => s(x).slice(0, 60)).slice(0, 30), seas: s(d.seas).trim() || null, water_temp_f: temp,
+    catches, notes: s(d.notes).trim().slice(0, 4000) || null, deleted_at: null, created_at: d.created_at || new Date().toISOString(),
+  };
+  const i = S.dayOutbox.findIndex(o => o.id === id);
+  const item = { id, boat_id: row.boat_id, row, error: null };
+  if (i >= 0) S.dayOutbox[i] = item; else S.dayOutbox.push(item);
+  if (!saveDayOutbox()) { f.saving = false; $('#day-save').disabled = false; toast("This phone is out of storage, so the day couldn't be saved. Free up space, then tap Save again.", 9000); return; }
+  const kinds = Object.keys(catches);
+  const photosOk = await commitFormPhotos(f, { day_id: id, boat_id: row.boat_id, fish: kinds.length === 1 ? kinds[0] : null });
+  clearDayDraft(); S.dayForm = null;
+  toast(photosOk ? (f.id ? 'Fishing day updated' : 'Fishing day saved') : 'Day saved, but a photo could not be stored on this phone.');
+  show('days'); window.scrollTo(0, 0); syncNow();
+}
+function deleteDay() {
+  const f = S.dayForm; if (!f?.id) return;
+  const base = daysList().find(x => x.id === f.id) || f.data;
+  const row = Object.fromEntries(DAY_COLS.map(k => [k, base[k] === undefined ? null : base[k]]));
+  row.id = f.id; row.boat_id = f.boat_id || S.boatId; row.deleted_at = new Date().toISOString();
+  const i = S.dayOutbox.findIndex(o => o.id === f.id);
+  const item = { id: f.id, boat_id: row.boat_id, row, error: null };
+  if (i >= 0) S.dayOutbox[i] = item; else S.dayOutbox.push(item);
+  saveDayOutbox();
+  clearDayDraft(); S.dayForm = null; toast('Fishing day deleted'); show('days'); syncNow();
+}
+
 // ------------------------------------------------------------------ wiring
 function wire() {
   // auth
@@ -1073,7 +1768,8 @@ function wire() {
   $('#boat-switch').addEventListener('click', () => { if (PILOT_BOAT_ONLY && S.boats.length <= 1) return; show('boat'); setTimeout(() => $('#boat-list').scrollIntoView({ behavior: 'smooth', block: 'center' }), 50); });
   $('#status').addEventListener('click', () => {
     if (S.authOffline && navigator.onLine !== false) { startReauth(); return; }
-    if (navigator.onLine === false) { toast(S.outbox.length ? `No signal. ${S.outbox.length} waiting on this phone; they upload when you get signal.` : 'No signal. The log still works; new bites upload later.'); return; }
+    const waiting = S.outbox.length + S.photoOutbox.length + S.dayOutbox.length;
+    if (navigator.onLine === false) { toast(waiting ? `No signal. ${waiting} waiting on this phone; they upload when you get signal.` : 'No signal. The log still works; new entries upload later.'); return; }
     toast('Syncing…', 1500); syncNow();
   });
   $('#btn-new').addEventListener('click', () => openForm(null));
@@ -1110,6 +1806,51 @@ function wire() {
     formChanged();
   }));
   $('#btn-gps').addEventListener('click', markGps);
+  // photos
+  $('#btn-add-photos').addEventListener('click', () => $('#photo-input').click());
+  $('#photo-input').addEventListener('change', ev => { const files = [...ev.target.files]; ev.target.value = ''; addPhotosFromGallery(files); });
+  $('#btn-f-photo').addEventListener('click', () => $('#f-photo-input').click());
+  $('#f-photo-input').addEventListener('change', async ev => {
+    const files = [...ev.target.files]; ev.target.value = ''; if (!S.form) return;
+    const f = S.form; const staged = await stageFiles(files); if (S.form !== f) return;
+    f.newPhotos.push(...staged); renderFormPhotos('#f-photos', f, photosFor(f.id));
+  });
+  $('#pv-back').addEventListener('click', closePhoto);
+  $('#pv-prev').addEventListener('click', () => stepPhoto(-1));
+  $('#pv-next').addEventListener('click', () => stepPhoto(1));
+  $('#pv-save').addEventListener('click', () => savePhotoDetails(false));
+  $('#pv-caption').addEventListener('input', () => { if (S.pv) S.pv.changed = true; });
+  $('#pv-share').addEventListener('click', sharePhoto);
+  $('#pv-del').addEventListener('click', () => { $('#pv-del-confirm').hidden = false; $('#pv-del').hidden = true; });
+  $('#pv-del-no').addEventListener('click', () => { $('#pv-del-confirm').hidden = true; $('#pv-del').hidden = false; });
+  $('#pv-del-yes').addEventListener('click', deletePhoto);
+  // fishing days
+  $('#btn-new-day').addEventListener('click', () => openDayForm(null));
+  ['#d-date', '#d-location', '#d-temp', '#d-notes', '#d-crew-other'].forEach(sel => $(sel).addEventListener('input', dayDraftSoon));
+  $('#pv-other').addEventListener('input', () => {
+    if (!S.pv) return; const v = $('#pv-other').value.trim().slice(0, 60);
+    if (v) { S.pv.fish = v; S.pv.changed = true; $$('#pv-fish .chip[data-v]').forEach(b => b.setAttribute('aria-pressed', 'false')); }
+  });
+  $('#day-back').addEventListener('click', () => closeDayForm());
+  $('#day-cancel').addEventListener('click', () => closeDayForm());
+  $('#day-discard-no').addEventListener('click', () => { $('#day-discard').hidden = true; });
+  $('#day-discard-yes').addEventListener('click', () => closeDayForm(true));
+  $('#day-save').addEventListener('click', saveDayForm);
+  $('#day-del').addEventListener('click', () => { $('#day-del-confirm').hidden = false; $('#day-del').hidden = true; });
+  $('#day-del-no').addEventListener('click', () => { $('#day-del-confirm').hidden = true; $('#day-del').hidden = false; });
+  $('#day-del-yes').addEventListener('click', deleteDay);
+  $('#d-addfish-form').addEventListener('submit', ev => {
+    ev.preventDefault(); if (!S.dayForm) return;
+    const v = $('#d-addfish').value.trim().slice(0, 60); if (!v) return;
+    $('#d-addfish').value = ''; const name = canonicalFish(v, Object.keys(S.dayForm.data.catches));
+    S.dayForm.data.catches[name] = (+S.dayForm.data.catches[name] || 0) + 1; renderTally(); dayDraftSoon();
+  });
+  $('#btn-d-photo').addEventListener('click', () => $('#d-photo-input').click());
+  $('#d-photo-input').addEventListener('change', async ev => {
+    const files = [...ev.target.files]; ev.target.value = ''; if (!S.dayForm) return;
+    const f = S.dayForm; const staged = await stageFiles(files); if (S.dayForm !== f) return;
+    f.newPhotos.push(...staged); renderFormPhotos('#d-photos', f, photosForDay(f.id));
+  });
   $('#gps-clear').addEventListener('click', () => { if (!S.form) return; S.form.data.lat = ''; S.form.data.lng = ''; renderGps(); formChanged(); });
   $('#btn-del').addEventListener('click', () => {
     $('#del-text').textContent = `Delete the ${fmtTime(S.form.data.bite_time) || ''} ${s(S.form.data.species) || 'bite'}? Everyone on the boat stops seeing it.`.replace(/\s+/g, ' ');
@@ -1134,7 +1875,7 @@ function registerSW() {
   let reloading = false;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController || reloading) return;
-    if (S.view === 'form' || S.view === 'auth') return; // never reload in the middle of logging a bite or signing in
+    if (['form', 'dayform', 'photo', 'auth'].includes(S.view)) return; // never reload in the middle of logging or signing in
     reloading = true; location.reload();
   });
   navigator.serviceWorker.register('sw.js').catch(e => console.warn('service worker', e));
@@ -1164,7 +1905,7 @@ async function boot() {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: 'bl1.auth' },
     // Look up fetch at call time (lets tests simulate no signal) and give every request a deadline,
     // so a connection that hangs offshore can't freeze syncing or the sign-in buttons.
-    global: { fetch: (url, opts = {}) => window.fetch(url, { ...opts, signal: opts.signal || timeoutSignal(25000) }) },
+    global: { fetch: (url, opts = {}) => window.fetch(url, { ...opts, signal: opts.signal || timeoutSignal(/\/storage\/v1\//.test(String(url?.url || url)) ? 180000 : 25000) }) },
   });
   S.sb.auth.onAuthStateChange((event, session) => {
     // run outside the auth callback (calling Supabase inside it can deadlock)
