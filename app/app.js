@@ -471,10 +471,10 @@ function renderBoat() {
   const so = $('#btn-signout');
   const offlineNow = navigator.onLine === false || !!S.lastSyncErr;
   so.textContent = !S.signoutArmed ? 'Sign out'
-    : S.outbox.length ? `Sign out anyway (${S.outbox.length} not uploaded)`
+    : pendingCount() ? `Sign out anyway (${pendingCount()} not uploaded)`
     : offlineNow ? "Sign out? You can't sign back in without signal" : 'Tap again to sign out';
   so.className = 'btn' + (S.signoutArmed ? ' danger' : '');
-  const mine = S.outbox.filter(o => o.boat_id === b.id).length;
+  const mine = [...S.outbox, ...S.photoOutbox, ...S.dayOutbox].filter(o => o.boat_id === b.id).length;
   $('#leave-text').textContent = `Leave ${b.name}? You'll stop seeing its log. Bites you logged stay in the boat's log.` + (mine ? ` ${mine} ${mine === 1 ? 'bite' : 'bites'} on this phone haven't uploaded yet; get signal first or they'll be lost.` : '');
 
   // bites stuck for a boat you're no longer on
@@ -513,7 +513,7 @@ function renderInstallBanner() {
   ban.replaceChildren(
     h('button', { class: 'x', type: 'button', 'aria-label': 'Dismiss', text: '×', onclick: () => { LS.set(K.installDismissed, true); renderInstallBanner(); } }),
     h('b', { text: 'Put the log on your home screen. ' }),
-    isIOS() && !S.installEvt ? (S.outbox.length ? `First let your ${S.outbox.length} un-uploaded ${S.outbox.length === 1 ? 'bite' : 'bites'} upload here (the home-screen app keeps its own storage). Then in Safari tap Share, then "Add to Home Screen". ` : 'In Safari, tap Share, then "Add to Home Screen". ') : '',
+    isIOS() && !S.installEvt ? (pendingCount() ? `First let your ${pendingCount()} un-uploaded ${pendingCount() === 1 ? 'entry' : 'entries'} upload here (the home-screen app keeps its own storage). Then in Safari tap Share, then "Add to Home Screen". ` : 'In Safari, tap Share, then "Add to Home Screen". ') : '',
     h('button', { class: 'link', type: 'button', text: S.installEvt ? 'Install' : 'Show me how', onclick: () => { if (S.installEvt) { const e = S.installEvt; S.installEvt = null; e.prompt(); render(); } else { show('boat'); setTimeout(() => $('#install-card').scrollIntoView({ behavior: 'smooth' }), 50); } } }));
 }
 
@@ -617,7 +617,7 @@ function handleSignedOut() {
 async function signOut() {
   if (!S.signoutArmed) {
     S.signoutArmed = true; renderBoat();
-    if (S.outbox.length) toast(`${S.outbox.length} ${S.outbox.length === 1 ? 'bite has' : 'bites have'} not uploaded. They stay on this phone and upload when you sign back in.`, 6000);
+    if (pendingCount()) toast(`${pendingCount()} ${pendingCount() === 1 ? 'entry has' : 'entries have'} not uploaded. They stay on this phone and upload when you sign back in.`, 6000);
     setTimeout(() => { if (S.signoutArmed) { S.signoutArmed = false; if (S.view === 'boat') renderBoat(); } }, 8000);
     return;
   }
@@ -746,10 +746,14 @@ async function removeMember(c) {
 }
 async function leaveBoat() {
   const b = curBoat(); if (!b) return;
-  if (S.outbox.some(o => o.boat_id === b.id) && navigator.onLine !== false) { await syncNow(); }
+  if ([...S.outbox, ...S.photoOutbox, ...S.dayOutbox].some(o => o.boat_id === b.id) && navigator.onLine !== false) { await syncNow(); }
   if (await rpcAction('remove_member', { p_boat: b.id, p_user: S.user.id }, `You left ${b.name}.`)) {
     LS.del(K.rows(b.id)); LS.del(K.cursor(b.id)); LS.del(K.crew(b.id));
     S.outbox = S.outbox.filter(o => o.boat_id !== b.id); saveOutbox();
+    [K.photos, K.pcursor, K.days, K.dcursor].forEach(k => LS.del(k(b.id)));
+    S.photoOutbox.filter(o => o.boat_id === b.id).forEach(o => IDB.del('pending', o.id).catch(() => {}));
+    S.photoOutbox = S.photoOutbox.filter(o => o.boat_id !== b.id); savePhotoOutbox();
+    S.dayOutbox = S.dayOutbox.filter(o => o.boat_id !== b.id); saveDayOutbox();
     S.boats = S.boats.filter(x => x.id !== b.id); S.boatId = S.boats[0]?.id || null; saveBoats(); loadBoatCache(); stopRealtime(); subscribeRealtime();
     $('#leave-confirm').hidden = true;
     S.view = 'log'; route(); syncNow();
@@ -925,7 +929,7 @@ function subscribeRealtime() {
         const r = payload.new && payload.new.id ? payload.new : null;
         const id = r ? r.id : payload.old?.id;
         if (!id || S.photoOutbox.some(o => o.id === id)) return;
-        if (!r || r.deleted_at) S.photos.delete(id); else S.photos.set(id, r);
+        if (!r || r.deleted_at) { S.photos.delete(id); forgetThumb(id); } else S.photos.set(id, r);
         savePhotos();
         if (['photos', 'log', 'days'].includes(S.view)) render();
       })
@@ -1051,6 +1055,8 @@ function fieldError(k, msg) {
 }
 async function saveForm() {
   if (!S.form || S.form.saving) return;
+  if (S.adding > 0) { toast('Wait a moment, the photo is still being added.'); return; }
+  clearTimeout(draftTimer);
   readFormFields();
   const f = S.form, src = f.data, row = {};
   let firstBad = null;
@@ -1085,7 +1091,8 @@ async function saveForm() {
   const photosOk = await commitFormPhotos(f, { catch_id: row.id, boat_id: row.boat_id, fish: row.species });
   if (!photosOk) toast('The bite is saved, but a photo could not be stored on this phone.', 6000);
   const offline = navigator.onLine === false || !S.sb || S.authOffline || !!S.lastSyncErr;
-  if (photosOk) toast(f.id ? (offline ? 'Changes saved on this phone. They upload when you have signal.' : 'Changes saved') : (offline ? 'Bite saved on this phone. It uploads when you have signal.' : 'Bite saved'));
+  const removedNote = f.removePhotos.length ? ` · ${f.removePhotos.length} photo${f.removePhotos.length === 1 ? '' : 's'} removed` : '';
+  if (photosOk) toast((f.id ? (offline ? 'Changes saved on this phone. They upload when you have signal.' : 'Changes saved') : (offline ? 'Bite saved on this phone. It uploads when you have signal.' : 'Bite saved')) + removedNote);
   S.form = null;
   if (row.boat_id !== S.boatId) { S.boatId = row.boat_id; saveBoats(); loadBoatCache(); }
   show('log'); window.scrollTo(0, 0);
@@ -1163,7 +1170,15 @@ const thumbUrls = new Map();   // photo id -> object URL of its thumbnail (kept 
 
 // ------------------------------------------------------------------ photos: data
 const savePhotos = () => { if (S.boatId) LS.set(K.photos(S.boatId), Object.fromEntries(S.photos)); };
-const savePhotoOutbox = () => (S.user ? LS.set(K.photoOutbox(S.user.id), S.photoOutbox) : true);
+function saveWithRoom(key, value) {
+  if (LS.set(key, value)) return true;
+  Object.keys(localStorage).filter(k => /^bl1\.b\./.test(k)).forEach(k => LS.del(k)); // cached copies re-download
+  return LS.set(key, value);
+}
+const savePhotoOutbox = () => (S.user ? saveWithRoom(K.photoOutbox(S.user.id), S.photoOutbox) : true);
+const pendingCount = () => S.outbox.length + S.photoOutbox.length + S.dayOutbox.length;
+// A deleted photo's thumbnail shouldn't linger on the phone.
+function forgetThumb(id) { IDB.del('thumbs', id).catch(() => {}); const u = thumbUrls.get(id); if (u) { URL.revokeObjectURL(u); thumbUrls.delete(id); } }
 function photosList() {
   const m = new Map(S.photos);
   const pend = new Map();
@@ -1231,6 +1246,8 @@ async function processImage(file) {
 }
 function showAdding() {
   ['#btn-add-photos', '#btn-f-photo', '#btn-d-photo'].forEach(sel => { $(sel).disabled = S.adding > 0; });
+  $('#btn-save').disabled = S.adding > 0 || !!S.form?.saving;
+  $('#day-save').disabled = S.adding > 0 || !!S.dayForm?.saving;
   $$('.adding-note').forEach(el => el.remove());
   if (S.adding > 0) {
     const txt = `Adding ${S.adding} ${S.adding === 1 ? 'photo' : 'photos'}…`;
@@ -1265,7 +1282,10 @@ async function queuePhoto(st, link) {
   const entry = { id: st.id, boat_id: bid, row, needsUpload: true, error: null };
   const at = S.photoOutbox.findIndex(o => o.id === st.id);
   if (at >= 0) S.photoOutbox[at] = entry; else S.photoOutbox.push(entry);
-  savePhotoOutbox();
+  if (!savePhotoOutbox()) {
+    S.photoOutbox = S.photoOutbox.filter(o => o.id !== st.id); IDB.del('pending', st.id).catch(() => {});
+    toast("This phone couldn't save the photo (storage full).", 7000); return false;
+  }
   return true;
 }
 // Change a photo's details (or delete it): queue an updated row.
@@ -1329,11 +1349,15 @@ async function pushPhotos() {
       const blobs = await IDB.get('pending', item.id).catch(() => null);
       if (blobs) { IDB.put('thumbs', { id: item.id, blob: blobs.thumb, at: Date.now() }).catch(() => {}); IDB.del('pending', item.id).catch(() => {}); }
       if (item.boat_id === S.boatId) { if (item.row.deleted_at) S.photos.delete(item.id); else S.photos.set(item.id, { ...item.row }); savePhotos(); }
+      if (item.row.deleted_at) {
+        forgetThumb(item.id);
+        S.sb.storage.from(PHOTO_BUCKET).remove([item.row.path, item.row.thumb_path]).catch(() => {}); // only the adder or a captain may; otherwise the file just stays hidden
+      }
     }
   }
 }
 const saveDays = () => { if (S.boatId) LS.set(K.days(S.boatId), Object.fromEntries(S.days)); };
-const saveDayOutbox = () => (S.user ? LS.set(K.dayOutbox(S.user.id), S.dayOutbox) : true);
+const saveDayOutbox = () => (S.user ? saveWithRoom(K.dayOutbox(S.user.id), S.dayOutbox) : true);
 async function pushDays() {
   const ids = boatIds();
   for (const item of S.dayOutbox.slice()) {
@@ -1367,7 +1391,7 @@ async function pullTable(bid, table, rowsKey, cursorKey, pendingIds, getMap) {
     for (const r of data) {
       if (!maxTs || parseTs(r.updated_at) > parseTs(maxTs)) maxTs = r.updated_at;
       if (pendingIds.has(r.id)) continue;
-      if (r.deleted_at) rows.delete(r.id); else rows.set(r.id, r);
+      if (r.deleted_at) { rows.delete(r.id); if (table === 'catch_photos') forgetThumb(r.id); } else rows.set(r.id, r);
     }
     if (LS.set(rowsKey(bid), Object.fromEntries(rows))) { if (maxTs) LS.set(cursorKey(bid), maxTs); } else LS.del(cursorKey(bid));
     if (data.length < PAGE) break;
@@ -1385,11 +1409,18 @@ function loadThumb(img, p) {
 }
 function pumpThumbs() {
   while (thumbWorkers < 4 && thumbQueue.length) {
-    const [img, p] = thumbQueue.shift(); thumbWorkers++;
+    const [img, p] = thumbQueue.shift(); if (!img.isConnected) continue;
+    thumbWorkers++;
     thumbBlobUrl(p).then(u => { if (u && img.isConnected) img.src = u; }).catch(() => {}).finally(() => { thumbWorkers--; pumpThumbs(); });
   }
 }
-async function thumbBlobUrl(p) {
+const thumbInflight = new Map();
+function thumbBlobUrl(p) {
+  if (thumbUrls.has(p.id)) return Promise.resolve(thumbUrls.get(p.id));
+  if (!thumbInflight.has(p.id)) thumbInflight.set(p.id, fetchThumb(p).finally(() => thumbInflight.delete(p.id)));
+  return thumbInflight.get(p.id);
+}
+async function fetchThumb(p) {
   if (thumbUrls.has(p.id)) return thumbUrls.get(p.id);
   let blob = (await IDB.get('pending', p.id).catch(() => null))?.thumb || (await IDB.get('thumbs', p.id).catch(() => null))?.blob;
   if (!blob && S.sb && navigator.onLine !== false && p.thumb_path) {
@@ -1705,6 +1736,7 @@ function canonicalFish(name, existing) {
 }
 async function saveDayForm() {
   const f = S.dayForm; if (!f || f.saving) return;
+  if (S.adding > 0) { toast('Wait a moment, the photo is still being added.'); return; }
   readDayForm();
   const d = f.data;
   const typed = canonicalFish($('#d-addfish').value, Object.keys(d.catches));
@@ -1735,7 +1767,8 @@ async function saveDayForm() {
   const kinds = Object.keys(catches);
   const photosOk = await commitFormPhotos(f, { day_id: id, boat_id: row.boat_id, fish: kinds.length === 1 ? kinds[0] : null });
   clearDayDraft(); S.dayForm = null;
-  toast(photosOk ? (f.id ? 'Fishing day updated' : 'Fishing day saved') : 'Day saved, but a photo could not be stored on this phone.');
+  const removedNote = f.removePhotos.length ? ` · ${f.removePhotos.length} photo${f.removePhotos.length === 1 ? '' : 's'} removed` : '';
+  toast(photosOk ? (f.id ? 'Fishing day updated' : 'Fishing day saved') + removedNote : 'Day saved, but a photo could not be stored on this phone.');
   show('days'); window.scrollTo(0, 0); syncNow();
 }
 function deleteDay() {
@@ -1813,7 +1846,7 @@ function wire() {
   $('#f-photo-input').addEventListener('change', async ev => {
     const files = [...ev.target.files]; ev.target.value = ''; if (!S.form) return;
     const f = S.form; const staged = await stageFiles(files); if (S.form !== f) return;
-    f.newPhotos.push(...staged); renderFormPhotos('#f-photos', f, photosFor(f.id));
+    f.newPhotos.push(...staged); renderFormPhotos('#f-photos', f, photosFor(f.id)); saveDraft();
   });
   $('#pv-back').addEventListener('click', closePhoto);
   $('#pv-prev').addEventListener('click', () => stepPhoto(-1));
@@ -1849,7 +1882,7 @@ function wire() {
   $('#d-photo-input').addEventListener('change', async ev => {
     const files = [...ev.target.files]; ev.target.value = ''; if (!S.dayForm) return;
     const f = S.dayForm; const staged = await stageFiles(files); if (S.dayForm !== f) return;
-    f.newPhotos.push(...staged); renderFormPhotos('#d-photos', f, photosForDay(f.id));
+    f.newPhotos.push(...staged); renderFormPhotos('#d-photos', f, photosForDay(f.id)); dayDraftSoon();
   });
   $('#gps-clear').addEventListener('click', () => { if (!S.form) return; S.form.data.lat = ''; S.form.data.lng = ''; renderGps(); formChanged(); });
   $('#btn-del').addEventListener('click', () => {
@@ -1897,7 +1930,7 @@ async function boot() {
 
   // Offline-first: show the last signed-in person's cached log straight away.
   const last = LS.get(K.lastUser, null);
-  if (last && last.id) { S.user = last; loadUserCache(last.id); S.view = 'log'; route(); restoreDraft(); }
+  if (last && last.id) { S.user = last; loadUserCache(last.id); S.view = 'log'; route(); if (!restoreDayDraft()) restoreDraft(); }
 
   const lib = window.supabase;
   if (!lib || !lib.createClient) { S.authOffline = !!last; if (!last) show('auth'); render(); return; }

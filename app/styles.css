@@ -226,7 +226,7 @@ button.status{cursor:pointer}
 .fthumbs:empty{display:none}
 .fthumb{position:relative;width:84px;height:84px;border-radius:10px;overflow:hidden;background:var(--surface-2);border:1px solid var(--line)}
 .fthumb img{width:100%;height:100%;object-fit:cover;display:block}
-.fthumb button{position:absolute;top:2px;right:2px;min-width:32px;min-height:32px;border:0;border-radius:99px;background:rgba(0,0,0,.6);color:#fff;font-size:18px;font-weight:700;line-height:1}
+.fthumb button{position:absolute;top:0;right:0;min-width:44px;min-height:44px;border:0;border-radius:99px;background:rgba(0,0,0,.6);color:#fff;font-size:18px;font-weight:700;line-height:1}
 .pv-count{margin-left:auto;color:var(--muted);font-weight:600;font-size:15px;font-variant-numeric:tabular-nums}
 .pv-stage{position:relative;margin-top:12px;background:#000;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;min-height:240px}
 .pv-stage img{display:block;max-width:100%;max-height:62vh;object-fit:contain}

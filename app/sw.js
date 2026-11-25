@@ -1,6 +1,6 @@
 // Billfish Log service worker: keeps the app itself available offshore with no signal.
 // Catch data never goes through this cache; it lives in the app's own storage and Supabase.
-const VERSION = 'bl-2026-11-25-5';
+const VERSION = 'bl-2026-11-25-6';
 const SHELL_CACHE = `shell-${VERSION}`;
 const RUNTIME_CACHE = 'runtime-v1';
 const SHELL = [
